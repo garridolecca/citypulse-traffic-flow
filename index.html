@@ -651,36 +651,8 @@
         // Load real road data and clean it
         const rawTrajectories = await loadCityData(cityKey);
 
-        // Clean the data so the original sample renderer works perfectly:
-        // 1. Remove duplicate consecutive points (cause NaN → division by zero)
-        // 2. Split at gaps > ~330m (bad name-based merges in OSM processing)
-        const MAX_GAP = 0.003;
-        const MIN_SEG = 0.000001;
-        const trajectories = [];
-        for (const t of rawTrajectories) {
-          // First: deduplicate consecutive points
-          const deduped = [t.path[0]];
-          for (let k = 1; k < t.path.length; k++) {
-            const dx = t.path[k][0] - deduped[deduped.length - 1][0];
-            const dy = t.path[k][1] - deduped[deduped.length - 1][1];
-            if (Math.abs(dx) > MIN_SEG || Math.abs(dy) > MIN_SEG) {
-              deduped.push(t.path[k]);
-            }
-          }
-          // Then: split at large gaps
-          let sub = [deduped[0]];
-          for (let k = 1; k < deduped.length; k++) {
-            const dx = deduped[k][0] - deduped[k - 1][0];
-            const dy = deduped[k][1] - deduped[k - 1][1];
-            if (Math.sqrt(dx * dx + dy * dy) > MAX_GAP) {
-              if (sub.length >= 2) trajectories.push({ path: sub, color: t.color });
-              sub = [deduped[k]];
-            } else {
-              sub.push(deduped[k]);
-            }
-          }
-          if (sub.length >= 2) trajectories.push({ path: sub, color: t.color });
-        }
+        // Data is pre-cleaned: no merging, deduped, Douglas-Peucker simplified
+        const trajectories = rawTrajectories;
 
         // Diagnostics
         const totalPts = trajectories.reduce((s, t) => s + t.path.length, 0);
