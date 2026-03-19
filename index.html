@@ -287,9 +287,9 @@
           dataFile: "data/porto-roads.json",
         },
         la: {
-          name: "Los Angeles, CA",
-          center: [-118.32, 34.05],
-          zoom: 13,
+          name: "Los Angeles County",
+          center: [-118.30, 34.15],
+          zoom: 11,
           dataFile: "data/la-roads.json",
         },
         nyc: {
@@ -889,7 +889,7 @@
             this.bindVertexArray(this.vao);
             gl.enable(gl.BLEND);
             gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
-            gl.drawElements(gl.TRIANGLES, this.indexBufferSize, gl.UNSIGNED_SHORT, 0);
+            gl.drawElements(gl.TRIANGLES, this.indexBufferSize, gl.UNSIGNED_INT, 0);
             this.bindVertexArray(null);
           };
 
@@ -999,7 +999,7 @@
           const vertexData = new ArrayBuffer(7 * vtxCount * 4);
           const floatData = new Float32Array(vertexData);
           const colorData = new Uint8Array(vertexData);
-          const indexData = new Uint16Array(idxCount);
+          const indexData = new Uint32Array(idxCount);
 
           let vtxCursor = 0;
           let idxCursor = 0;
