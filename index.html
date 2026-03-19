@@ -684,8 +684,28 @@
           map.layers.remove(flowLayer);
         }
 
-        // Load real road data
-        const trajectories = await loadCityData(cityKey);
+        // Load real road data and clean it
+        const rawTrajectories = await loadCityData(cityKey);
+
+        // Split any path that has a gap > ~330m between consecutive points.
+        // These gaps come from bad name-based merges in the OSM processing
+        // and appear as straight lines flashing across the map.
+        const MAX_GAP_DEG = 0.003;
+        const trajectories = [];
+        for (const t of rawTrajectories) {
+          let sub = [t.path[0]];
+          for (let k = 1; k < t.path.length; k++) {
+            const dx = t.path[k][0] - t.path[k - 1][0];
+            const dy = t.path[k][1] - t.path[k - 1][1];
+            if (Math.sqrt(dx * dx + dy * dy) > MAX_GAP_DEG) {
+              if (sub.length >= 2) trajectories.push({ path: sub, color: t.color });
+              sub = [t.path[k]];
+            } else {
+              sub.push(t.path[k]);
+            }
+          }
+          if (sub.length >= 2) trajectories.push({ path: sub, color: t.color });
+        }
 
         // Convert to ArcGIS graphics
         const graphics = trajectories.map((t) => ({
