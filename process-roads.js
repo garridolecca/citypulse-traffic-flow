@@ -18,32 +18,43 @@ const COLORS = [
   [255, 255, 100], // yellow
 ];
 
-// Maximum allowed distance (in degrees) between consecutive points.
-// Anything larger means a bad merge/jump. ~0.001° ≈ 110m
-const MAX_POINT_GAP = 0.0015;
+// Chain tolerance: ~11m — endpoints must be very close
+const CHAIN_TOLERANCE = 0.0001;
 
-// Merge tolerance: endpoints must be within this to chain (~15m)
-const CHAIN_TOLERANCE = 0.00015;
+// Max gap between consecutive points before splitting: ~55m
+const MAX_GAP = 0.0005;
+
+// Min path length in degrees to keep (~110m)
+const MIN_PATH_LENGTH = 0.001;
 
 function processCity(inputFile, outputFile) {
   const raw = JSON.parse(readFileSync(inputFile, "utf-8"));
   const ways = raw.elements.filter((e) => e.type === "way" && e.geometry);
 
-  console.log(`${inputFile}: ${ways.length} ways found`);
+  console.log(`${inputFile}: ${ways.length} total ways`);
 
-  // Group ways by road name to merge connected segments
+  // Filter out _link (ramps) — shouldn't be present with exact queries,
+  // but guard just in case
+  const filtered = ways.filter((w) => {
+    const hw = w.tags?.highway || "";
+    return !hw.includes("_link");
+  });
+
+  console.log(`  ${filtered.length} ways after removing _link`);
+
+  // Group by road name for chaining
   const roadGroups = {};
-  for (const way of ways) {
-    const name = way.tags?.name || way.tags?.ref || `unnamed_${way.id}`;
+  for (const way of filtered) {
+    // Use unique ID for unnamed roads — they won't merge with anything
+    const name = way.tags?.name || way.tags?.ref || `_u${way.id}`;
     const highway = way.tags?.highway || "primary";
     if (!roadGroups[name]) roadGroups[name] = { ways: [], highway };
     roadGroups[name].ways.push(way);
   }
 
-  console.log(`  ${Object.keys(roadGroups).length} named roads`);
-
   const trajectories = [];
-  let jumpsSplit = 0;
+  let gapSplits = 0;
+  let tooShort = 0;
 
   for (const [name, group] of Object.entries(roadGroups)) {
     const segments = group.ways.map((w) =>
@@ -53,29 +64,35 @@ function processCity(inputFile, outputFile) {
       ])
     );
 
-    // Chain segments that share endpoints (tight tolerance)
+    // Chain segments with very tight tolerance (essentially touching)
     const chains = chainSegments(segments);
 
     for (const chain of chains) {
-      if (chain.length < 3) continue;
+      if (chain.length < 2) continue;
 
-      // Split chain at any large gaps (bad merges / teleports)
-      const subChains = splitAtGaps(chain, MAX_POINT_GAP);
-      jumpsSplit += subChains.length - 1;
+      // Split at any gaps > 55m (catches bad merges)
+      const subChains = splitAtGaps(chain, MAX_GAP);
+      if (subChains.length > 1) gapSplits += subChains.length - 1;
 
       for (const sub of subChains) {
-        if (sub.length < 3) continue;
+        if (sub.length < 2) continue;
 
-        // Douglas-Peucker simplification (preserves road shape)
-        const simplified = douglasPeucker(sub, 0.00003); // ~3m tolerance
+        // Douglas-Peucker simplification (~1.5m tolerance)
+        const simplified = douglasPeucker(sub, 0.000015);
+        if (simplified.length < 2) continue;
 
-        if (simplified.length < 3) continue;
+        // Filter out very short paths
+        const pathLen = pathLength(simplified);
+        if (pathLen < MIN_PATH_LENGTH) {
+          tooShort++;
+          continue;
+        }
 
-        // Color by road type
         let colorIdx;
         if (group.highway === "motorway") colorIdx = 0;
         else if (group.highway === "trunk") colorIdx = 5;
-        else colorIdx = trajectories.length % COLORS.length;
+        else if (group.highway === "primary") colorIdx = trajectories.length % COLORS.length;
+        else colorIdx = (trajectories.length * 3 + 1) % COLORS.length;
 
         trajectories.push({
           path: simplified,
@@ -85,15 +102,15 @@ function processCity(inputFile, outputFile) {
     }
   }
 
-  console.log(`  ${jumpsSplit} gap-splits removed bad merges`);
+  console.log(`  ${gapSplits} gap-splits, ${tooShort} too-short filtered`);
+  console.log(`  ${trajectories.length} base trajectories`);
 
-  // Create overlapping sub-paths along long roads for denser animation
+  // Sub-paths for denser animation on longer roads
   const extraTrajectories = [];
   for (const t of trajectories) {
     if (t.path.length >= 6) {
       const len = t.path.length;
-      // More sub-paths for longer roads
-      const subCount = Math.min(5, Math.max(2, Math.floor(len / 4)));
+      const subCount = Math.min(4, Math.max(1, Math.floor(len / 5)));
       for (let i = 0; i < subCount; i++) {
         const start = Math.floor((i * len) / (subCount + 1));
         const end = Math.min(len, start + Math.floor(len * 0.5));
@@ -111,18 +128,18 @@ function processCity(inputFile, outputFile) {
   const allTrajectories = [...trajectories, ...extraTrajectories];
 
   console.log(
-    `  ${allTrajectories.length} trajectories (${trajectories.length} base + ${extraTrajectories.length} extra)`
+    `  ${allTrajectories.length} total (${trajectories.length} base + ${extraTrajectories.length} sub-paths)`
   );
 
   const totalPoints = allTrajectories.reduce((s, t) => s + t.path.length, 0);
-  console.log(`  ${totalPoints} total points`);
+  const avgPts = (totalPoints / allTrajectories.length).toFixed(1);
+  console.log(`  ${totalPoints} total points (avg ${avgPts} pts/trajectory)`);
 
   writeFileSync(outputFile, JSON.stringify(allTrajectories));
   const size = readFileSync(outputFile).length;
-  console.log(`  Output: ${outputFile} (${(size / 1024).toFixed(1)} KB)`);
+  console.log(`  Output: ${outputFile} (${(size / 1024).toFixed(1)} KB)\n`);
 }
 
-// Split a polyline wherever consecutive points are too far apart
 function splitAtGaps(chain, maxGap) {
   const result = [];
   let current = [chain[0]];
@@ -130,7 +147,6 @@ function splitAtGaps(chain, maxGap) {
   for (let i = 1; i < chain.length; i++) {
     const d = dist(chain[i - 1], chain[i]);
     if (d > maxGap) {
-      // Gap detected — start a new sub-chain
       if (current.length >= 2) result.push(current);
       current = [chain[i]];
     } else {
@@ -139,50 +155,7 @@ function splitAtGaps(chain, maxGap) {
   }
 
   if (current.length >= 2) result.push(current);
-  return result;
-}
-
-// Douglas-Peucker line simplification (preserves shape better than every-Nth)
-function douglasPeucker(points, epsilon) {
-  if (points.length <= 2) return points;
-
-  // Find the point with max distance from the line between first and last
-  let maxDist = 0;
-  let maxIdx = 0;
-  const first = points[0];
-  const last = points[points.length - 1];
-
-  for (let i = 1; i < points.length - 1; i++) {
-    const d = perpendicularDist(points[i], first, last);
-    if (d > maxDist) {
-      maxDist = d;
-      maxIdx = i;
-    }
-  }
-
-  if (maxDist > epsilon) {
-    const left = douglasPeucker(points.slice(0, maxIdx + 1), epsilon);
-    const right = douglasPeucker(points.slice(maxIdx), epsilon);
-    return [...left.slice(0, -1), ...right];
-  } else {
-    return [first, last];
-  }
-}
-
-function perpendicularDist(point, lineStart, lineEnd) {
-  const dx = lineEnd[0] - lineStart[0];
-  const dy = lineEnd[1] - lineStart[1];
-  const lenSq = dx * dx + dy * dy;
-
-  if (lenSq === 0) return dist(point, lineStart);
-
-  let t = ((point[0] - lineStart[0]) * dx + (point[1] - lineStart[1]) * dy) / lenSq;
-  t = Math.max(0, Math.min(1, t));
-
-  const projX = lineStart[0] + t * dx;
-  const projY = lineStart[1] + t * dy;
-
-  return dist(point, [projX, projY]);
+  return result.length > 0 ? result : [[...chain]];
 }
 
 function chainSegments(segments) {
@@ -228,12 +201,57 @@ function chainSegments(segments) {
   return chains.filter(Boolean);
 }
 
+function douglasPeucker(points, epsilon) {
+  if (points.length <= 2) return points;
+
+  let maxDist = 0;
+  let maxIdx = 0;
+  const first = points[0];
+  const last = points[points.length - 1];
+
+  for (let i = 1; i < points.length - 1; i++) {
+    const d = perpendicularDist(points[i], first, last);
+    if (d > maxDist) {
+      maxDist = d;
+      maxIdx = i;
+    }
+  }
+
+  if (maxDist > epsilon) {
+    const left = douglasPeucker(points.slice(0, maxIdx + 1), epsilon);
+    const right = douglasPeucker(points.slice(maxIdx), epsilon);
+    return [...left.slice(0, -1), ...right];
+  } else {
+    return [first, last];
+  }
+}
+
+function perpendicularDist(point, lineStart, lineEnd) {
+  const dx = lineEnd[0] - lineStart[0];
+  const dy = lineEnd[1] - lineStart[1];
+  const lenSq = dx * dx + dy * dy;
+
+  if (lenSq === 0) return dist(point, lineStart);
+
+  let t = ((point[0] - lineStart[0]) * dx + (point[1] - lineStart[1]) * dy) / lenSq;
+  t = Math.max(0, Math.min(1, t));
+
+  return dist(point, [lineStart[0] + t * dx, lineStart[1] + t * dy]);
+}
+
+function pathLength(points) {
+  let len = 0;
+  for (let i = 1; i < points.length; i++) {
+    len += dist(points[i - 1], points[i]);
+  }
+  return len;
+}
+
 function dist(a, b) {
   const dx = a[0] - b[0];
   const dy = a[1] - b[1];
   return Math.sqrt(dx * dx + dy * dy);
 }
 
-// Process both cities
 processCity("la-raw.json", "data/la-roads.json");
 processCity("porto-raw.json", "data/porto-roads.json");
