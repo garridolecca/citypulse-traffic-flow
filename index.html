@@ -1,0 +1,993 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>CityPulse - GPU-Accelerated Urban Traffic Flow</title>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/gl-matrix/2.8.1/gl-matrix.js"></script>
+    <link rel="stylesheet" href="https://js.arcgis.com/5.0/esri/themes/dark/main.css" />
+    <script type="module" src="https://js.arcgis.com/5.0/"></script>
+
+    <style>
+      html, body, #viewDiv {
+        height: 100%;
+        margin: 0;
+        padding: 0;
+        overflow: hidden;
+        background: #0a0a14;
+      }
+
+      #infoPanel {
+        position: absolute;
+        top: 15px;
+        right: 15px;
+        background: rgba(10, 10, 20, 0.88);
+        backdrop-filter: blur(12px);
+        -webkit-backdrop-filter: blur(12px);
+        border: 1px solid rgba(0, 238, 255, 0.2);
+        border-radius: 12px;
+        padding: 20px;
+        color: #e0e0e0;
+        font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+        width: 270px;
+        z-index: 100;
+        box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+      }
+
+      #infoPanel h1 {
+        margin: 0 0 2px 0;
+        font-size: 22px;
+        color: #00eeff;
+        font-weight: 700;
+        letter-spacing: -0.5px;
+      }
+
+      .subtitle {
+        font-size: 10px;
+        color: #666;
+        margin-bottom: 14px;
+        text-transform: uppercase;
+        letter-spacing: 1.5px;
+      }
+
+      .stat {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin: 6px 0;
+        font-size: 12px;
+      }
+
+      .stat-label { color: #999; }
+      .stat-value { color: #00eeff; font-weight: 600; font-size: 13px; }
+
+      .divider {
+        height: 1px;
+        background: linear-gradient(90deg, transparent, rgba(0,238,255,0.2), transparent);
+        margin: 12px 0;
+      }
+
+      .control-group {
+        margin: 10px 0;
+      }
+
+      .control-group label {
+        display: flex;
+        justify-content: space-between;
+        font-size: 11px;
+        color: #999;
+        margin-bottom: 4px;
+      }
+
+      .control-value {
+        color: #00eeff;
+        font-weight: 600;
+      }
+
+      .control-group input[type="range"] {
+        width: 100%;
+        height: 4px;
+        -webkit-appearance: none;
+        appearance: none;
+        background: rgba(0, 238, 255, 0.15);
+        border-radius: 2px;
+        outline: none;
+      }
+
+      .control-group input[type="range"]::-webkit-slider-thumb {
+        -webkit-appearance: none;
+        width: 14px;
+        height: 14px;
+        border-radius: 50%;
+        background: #00eeff;
+        cursor: pointer;
+        box-shadow: 0 0 8px rgba(0, 238, 255, 0.5);
+      }
+
+      .badge {
+        display: inline-block;
+        background: rgba(0, 238, 255, 0.1);
+        border: 1px solid rgba(0, 238, 255, 0.25);
+        border-radius: 4px;
+        padding: 1px 7px;
+        font-size: 10px;
+        color: #00eeff;
+      }
+
+      .footer-text {
+        font-size: 9px;
+        color: #444;
+        margin-top: 10px;
+        line-height: 1.5;
+      }
+
+      .legend {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+        margin-top: 6px;
+      }
+
+      .legend-item {
+        display: flex;
+        align-items: center;
+        gap: 4px;
+        font-size: 10px;
+        color: #888;
+      }
+
+      .legend-dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        flex-shrink: 0;
+      }
+
+      .city-btn {
+        display: inline-block;
+        background: rgba(0, 238, 255, 0.08);
+        border: 1px solid rgba(0, 238, 255, 0.2);
+        border-radius: 6px;
+        padding: 5px 10px;
+        font-size: 11px;
+        color: #ccc;
+        cursor: pointer;
+        transition: all 0.2s;
+        margin-right: 4px;
+      }
+
+      .city-btn:hover { background: rgba(0, 238, 255, 0.15); color: #fff; }
+      .city-btn.active {
+        background: rgba(0, 238, 255, 0.2);
+        border-color: #00eeff;
+        color: #00eeff;
+      }
+
+      @media (max-width: 600px) {
+        #infoPanel { width: 220px; padding: 14px; top: 10px; right: 10px; }
+      }
+    </style>
+
+    <script type="module">
+      const [
+        Map,
+        reactiveUtils,
+        webMercatorUtils,
+        GraphicsLayer,
+        MapView,
+        BaseLayerViewGL2D,
+      ] = await $arcgis.import([
+        "@arcgis/core/Map.js",
+        "@arcgis/core/core/reactiveUtils.js",
+        "@arcgis/core/geometry/support/webMercatorUtils.js",
+        "@arcgis/core/layers/GraphicsLayer.js",
+        "@arcgis/core/views/MapView.js",
+        "@arcgis/core/views/2d/layers/BaseLayerViewGL2D.js",
+      ]);
+
+      // ============================================================
+      // Seeded PRNG for reproducible trajectories
+      // ============================================================
+      function mulberry32(a) {
+        return function () {
+          a |= 0;
+          a = (a + 0x6d2b79f5) | 0;
+          let t = Math.imul(a ^ (a >>> 15), 1 | a);
+          t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+          return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+        };
+      }
+
+      // ============================================================
+      // City Configurations
+      // ============================================================
+      const CITIES = {
+        porto: {
+          name: "Porto, Portugal",
+          center: [-8.615, 41.150],
+          zoom: 14,
+          nodes: [
+            [-8.6105, 41.1455], // 0  São Bento Station
+            [-8.6138, 41.1459], // 1  Clérigos
+            [-8.6058, 41.1488], // 2  Bolhão Market
+            [-8.6130, 41.1407], // 3  Ribeira
+            [-8.5955, 41.1467], // 4  Campanhã Station
+            [-8.6306, 41.1580], // 5  Casa da Música
+            [-8.6380, 41.1530], // 6  Boavista
+            [-8.6200, 41.1520], // 7  Cedofeita
+            [-8.6200, 41.1620], // 8  Constituição
+            [-8.6020, 41.1580], // 9  Marquês
+            [-8.5900, 41.1550], // 10 Bonfim
+            [-8.5834, 41.1615], // 11 Estádio do Dragão
+            [-8.6020, 41.1700], // 12 Paranhos
+            [-8.6100, 41.1830], // 13 Hospital S. João
+            [-8.6450, 41.1670], // 14 Francos
+            [-8.6550, 41.1750], // 15 Ramalde
+            [-8.6700, 41.1850], // 16 Matosinhos Sul
+            [-8.6480, 41.1500], // 17 Lordelo
+            [-8.6600, 41.1560], // 18 Foz do Douro
+            [-8.6350, 41.1450], // 19 Massarelos
+            [-8.5950, 41.1350], // 20 V.N. Gaia
+            [-8.6100, 41.1350], // 21 Gaia Center
+            [-8.6300, 41.1380], // 22 Gaia West
+            [-8.6250, 41.1750], // 23 Amial
+            [-8.5750, 41.1420], // 24 Gaia East
+            [-8.6180, 41.1480], // 25 Aliados
+            [-8.5880, 41.1480], // 26 Antas
+            [-8.6050, 41.1400], // 27 Ponte D. Luís I
+            [-8.6320, 41.1630], // 28 Carolina Michaelis
+            [-8.6150, 41.1580], // 29 Lapa
+          ],
+          edges: [
+            [0, 1], [0, 2], [0, 3], [0, 25], [0, 27],
+            [1, 7], [1, 19], [1, 25],
+            [2, 4], [2, 9], [2, 7], [2, 25], [2, 26],
+            [3, 20], [3, 21], [3, 19], [3, 27],
+            [4, 10], [4, 11], [4, 26],
+            [5, 6], [5, 7], [5, 8], [5, 14], [5, 28],
+            [6, 17], [6, 19], [6, 7],
+            [7, 8], [7, 9], [7, 25], [7, 29],
+            [8, 9], [8, 12], [8, 14], [8, 23], [8, 28], [8, 29],
+            [9, 10], [9, 12], [9, 29],
+            [10, 11], [10, 26],
+            [11, 24],
+            [12, 13], [12, 23],
+            [13, 23],
+            [14, 15], [14, 28],
+            [15, 16], [15, 23],
+            [16, 18],
+            [17, 18], [17, 19],
+            [19, 22],
+            [20, 21], [20, 24], [20, 27],
+            [21, 22], [21, 27],
+            [25, 7], [25, 29],
+            [26, 11],
+            [28, 29], [28, 14],
+          ],
+          trajectoryCount: 600,
+        },
+
+        la: {
+          name: "Los Angeles, CA",
+          center: [-118.25, 34.05],
+          zoom: 12,
+          nodes: [
+            [-118.2437, 34.0522], // 0  Downtown / City Hall
+            [-118.2553, 34.0488], // 1  Financial District
+            [-118.2673, 34.0430], // 2  Convention Center
+            [-118.2330, 34.0580], // 3  Arts District
+            [-118.2200, 34.0560], // 4  Boyle Heights
+            [-118.2980, 34.0620], // 5  Koreatown
+            [-118.3287, 34.0690], // 6  Wilshire / La Brea
+            [-118.3580, 34.0600], // 7  Beverly Center
+            [-118.3890, 34.0580], // 8  Beverly Hills
+            [-118.4100, 34.0530], // 9  Century City
+            [-118.2860, 34.0230], // 10 USC / Exposition
+            [-118.2600, 34.0240], // 11 South LA
+            [-118.3080, 34.0210], // 12 Leimert Park
+            [-118.2440, 34.0770], // 13 Echo Park
+            [-118.2600, 34.0780], // 14 Silver Lake
+            [-118.2810, 34.0990], // 15 Los Feliz
+            [-118.3270, 34.1020], // 16 Hollywood
+            [-118.3520, 34.1010], // 17 West Hollywood
+            [-118.3960, 34.0810], // 18 Westwood / UCLA
+            [-118.4430, 34.0340], // 19 Santa Monica
+            [-118.4560, 34.0080], // 20 Venice
+            [-118.3920, 34.0230], // 21 Culver City
+            [-118.3530, 34.0280], // 22 Mid-City
+            [-118.2050, 34.0670], // 23 Lincoln Heights
+            [-118.1880, 34.0560], // 24 East LA
+            [-118.3360, 34.0430], // 25 Miracle Mile
+            [-118.2680, 34.0620], // 26 Westlake
+            [-118.3000, 34.0830], // 27 Larchmont
+            [-118.3680, 34.1380], // 28 Universal City
+            [-118.3260, 34.1430], // 29 Burbank (Media)
+          ],
+          edges: [
+            [0, 1], [0, 3], [0, 13], [0, 26], [0, 11],
+            [1, 2], [1, 5], [1, 26],
+            [2, 10], [2, 11], [2, 1],
+            [3, 4], [3, 13], [3, 23],
+            [4, 24], [4, 23],
+            [5, 6], [5, 26], [5, 27], [5, 10],
+            [6, 7], [6, 25], [6, 27], [6, 16],
+            [7, 8], [7, 17], [7, 25],
+            [8, 9], [8, 18], [8, 17],
+            [9, 18], [9, 21],
+            [10, 11], [10, 12], [10, 22],
+            [11, 12],
+            [12, 22], [12, 21],
+            [13, 14], [13, 23], [13, 26],
+            [14, 15], [14, 26], [14, 27],
+            [15, 16], [15, 27], [15, 29],
+            [16, 17], [16, 28], [16, 29],
+            [17, 18], [17, 28],
+            [18, 19], [18, 21],
+            [19, 20], [19, 21],
+            [20, 21],
+            [21, 22],
+            [22, 25],
+            [25, 7], [25, 22],
+            [26, 5], [26, 14],
+            [27, 16], [27, 15],
+            [28, 29],
+          ],
+          trajectoryCount: 500,
+        },
+      };
+
+      // ============================================================
+      // Color Palette
+      // ============================================================
+      const COLORS = [
+        [0, 238, 255],   // electric cyan
+        [255, 50, 120],  // hot pink
+        [255, 200, 0],   // gold
+        [0, 255, 170],   // spring green
+        [140, 80, 255],  // purple
+        [255, 120, 0],   // orange
+        [0, 191, 255],   // sky blue
+        [255, 70, 70],   // coral
+        [80, 255, 80],   // neon green
+        [255, 160, 240], // pink
+        [0, 200, 200],   // teal
+        [255, 255, 100], // yellow
+      ];
+
+      // ============================================================
+      // Trajectory Generator
+      // ============================================================
+      function generateTrajectories(cityKey) {
+        const city = CITIES[cityKey];
+        const random = mulberry32(12345);
+        const { nodes, edges, trajectoryCount } = city;
+
+        // Build adjacency
+        const adj = {};
+        for (let i = 0; i < nodes.length; i++) adj[i] = [];
+        for (const [a, b] of edges) {
+          adj[a].push(b);
+          adj[b].push(a);
+        }
+
+        const trajectories = [];
+
+        for (let t = 0; t < trajectoryCount; t++) {
+          // Random walk of 4-10 steps
+          const walkLength = 4 + Math.floor(random() * 7);
+          const start = Math.floor(random() * nodes.length);
+          const walk = [start];
+          let current = start;
+
+          for (let step = 0; step < walkLength; step++) {
+            const neighbors = adj[current];
+            if (!neighbors || neighbors.length === 0) break;
+
+            // Avoid immediate backtrack
+            let next;
+            let attempts = 0;
+            do {
+              next = neighbors[Math.floor(random() * neighbors.length)];
+              attempts++;
+            } while (walk.length > 1 && next === walk[walk.length - 2] && attempts < 5);
+
+            walk.push(next);
+            current = next;
+          }
+
+          if (walk.length < 2) continue;
+
+          // Interpolate path between nodes
+          const path = [];
+          for (let i = 0; i < walk.length - 1; i++) {
+            const from = nodes[walk[i]];
+            const to = nodes[walk[i + 1]];
+            const segments = 3 + Math.floor(random() * 4);
+
+            for (let s = 0; s <= segments; s++) {
+              if (i > 0 && s === 0) continue; // avoid duplicates at joins
+              const frac = s / segments;
+              const lng = from[0] + (to[0] - from[0]) * frac + (random() - 0.5) * 0.0008;
+              const lat = from[1] + (to[1] - from[1]) * frac + (random() - 0.5) * 0.0008;
+              path.push([lng, lat]);
+            }
+          }
+
+          const color = COLORS[t % COLORS.length];
+          trajectories.push({ path, color });
+        }
+
+        return trajectories;
+      }
+
+      // ============================================================
+      // Custom Layer View (WebGL Animated Lines)
+      // ============================================================
+      const CustomLayerView2D = BaseLayerViewGL2D.createSubclass({
+        aPosition: 0,
+        aOffset: 1,
+        aDistance: 2,
+        aSide: 3,
+        aColor: 4,
+
+        constructor: function () {
+          this.transform = mat3.create();
+          this.extrude = mat3.create();
+          this.translationToCenter = vec2.create();
+          this.screenTranslation = vec2.create();
+          this.display = mat3.fromValues(NaN, 0, 0, 0, NaN, 0, -1, 1, 1);
+          this.screenScaling = vec3.fromValues(NaN, NaN, 1);
+          this.needsUpdate = false;
+        },
+
+        attach: function () {
+          const gl = this.context;
+
+          const requestUpdate = () => {
+            this.needsUpdate = true;
+            this.requestRender();
+          };
+
+          this.watcher = reactiveUtils.on(
+            () => this.layer.graphics,
+            "change",
+            requestUpdate,
+          );
+
+          const vertexSource = `
+            precision highp float;
+            uniform mat3 u_transform;
+            uniform mat3 u_extrude;
+            uniform mat3 u_display;
+
+            attribute vec2 a_position;
+            attribute vec2 a_offset;
+            attribute float a_distance;
+            attribute float a_side;
+            attribute vec4 a_color;
+
+            varying float v_distance;
+            varying float v_side;
+            varying vec4 v_color;
+
+            void main(void) {
+              gl_Position.xy = (u_display * (u_transform * vec3(a_position, 1.0) + u_extrude * vec3(a_offset, 0.0))).xy;
+              gl_Position.zw = vec2(0.0, 1.0);
+              v_distance = a_distance;
+              v_side = a_side;
+              v_color = a_color;
+            }`;
+
+          const fragmentSource = `
+            precision highp float;
+            uniform float u_current_time;
+            uniform float u_trail_speed;
+            uniform float u_trail_length;
+            uniform float u_trail_cycle;
+
+            varying float v_distance;
+            varying float v_side;
+            varying vec4 v_color;
+
+            void main(void) {
+              float d = mod(v_distance - u_current_time * u_trail_speed, u_trail_cycle);
+
+              // Trail body with smooth falloff
+              float trail = d < u_trail_length ? smoothstep(0.0, 1.0, d / u_trail_length) : 0.0;
+
+              // Bright leading head
+              float head = d > u_trail_length * 0.85 && d < u_trail_length
+                ? (d - u_trail_length * 0.85) / (u_trail_length * 0.15) * 0.8
+                : 0.0;
+
+              // Edge softness
+              float edge = exp(-abs(v_side) * 3.0);
+
+              float a = (trail + head) * edge;
+              gl_FragColor = v_color * a;
+            }`;
+
+          const vertexShader = gl.createShader(gl.VERTEX_SHADER);
+          gl.shaderSource(vertexShader, vertexSource);
+          gl.compileShader(vertexShader);
+
+          const fragmentShader = gl.createShader(gl.FRAGMENT_SHADER);
+          gl.shaderSource(fragmentShader, fragmentSource);
+          gl.compileShader(fragmentShader);
+
+          this.program = gl.createProgram();
+          gl.attachShader(this.program, vertexShader);
+          gl.attachShader(this.program, fragmentShader);
+
+          gl.bindAttribLocation(this.program, this.aPosition, "a_position");
+          gl.bindAttribLocation(this.program, this.aOffset, "a_offset");
+          gl.bindAttribLocation(this.program, this.aDistance, "a_distance");
+          gl.bindAttribLocation(this.program, this.aSide, "a_side");
+          gl.bindAttribLocation(this.program, this.aColor, "a_color");
+
+          gl.linkProgram(this.program);
+          gl.deleteShader(vertexShader);
+          gl.deleteShader(fragmentShader);
+
+          this.uTransform = gl.getUniformLocation(this.program, "u_transform");
+          this.uExtrude = gl.getUniformLocation(this.program, "u_extrude");
+          this.uDisplay = gl.getUniformLocation(this.program, "u_display");
+          this.uCurrentTime = gl.getUniformLocation(this.program, "u_current_time");
+          this.uTrailSpeed = gl.getUniformLocation(this.program, "u_trail_speed");
+          this.uTrailLength = gl.getUniformLocation(this.program, "u_trail_length");
+          this.uTrailCycle = gl.getUniformLocation(this.program, "u_trail_cycle");
+
+          this.vertexBuffer = gl.createBuffer();
+          this.indexBuffer = gl.createBuffer();
+          this.indexBufferSize = 0;
+
+          if (gl.getParameter(gl.VERSION).startsWith("WebGL 2.0")) {
+            this.vao = gl.createVertexArray();
+            this.bindVertexArray = (vao) => gl.bindVertexArray(vao);
+            this.deleteVertexArray = (vao) => gl.deleteVertexArray(vao);
+          } else {
+            const ext = gl.getExtension("OES_vertex_array_object");
+            this.vao = ext.createVertexArrayOES();
+            this.bindVertexArray = (vao) => ext.bindVertexArrayOES(vao);
+            this.deleteVertexArray = (vao) => ext.deleteVertexArrayOES(vao);
+          }
+
+          this.bindVertexArray(this.vao);
+          gl.bindBuffer(gl.ARRAY_BUFFER, this.vertexBuffer);
+          gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, this.indexBuffer);
+          gl.enableVertexAttribArray(this.aPosition);
+          gl.enableVertexAttribArray(this.aOffset);
+          gl.enableVertexAttribArray(this.aDistance);
+          gl.enableVertexAttribArray(this.aSide);
+          gl.enableVertexAttribArray(this.aColor);
+          gl.vertexAttribPointer(this.aPosition, 2, gl.FLOAT, false, 28, 0);
+          gl.vertexAttribPointer(this.aOffset, 2, gl.FLOAT, false, 28, 8);
+          gl.vertexAttribPointer(this.aDistance, 1, gl.FLOAT, false, 28, 16);
+          gl.vertexAttribPointer(this.aSide, 1, gl.FLOAT, false, 28, 20);
+          gl.vertexAttribPointer(this.aColor, 4, gl.UNSIGNED_BYTE, true, 28, 24);
+          this.bindVertexArray(null);
+
+          this.centerAtLastUpdate = vec2.fromValues(
+            this.view.state.center[0],
+            this.view.state.center[1],
+          );
+        },
+
+        detach: function () {
+          this.watcher.remove();
+          const gl = this.context;
+          gl.deleteBuffer(this.vertexBuffer);
+          gl.deleteBuffer(this.indexBuffer);
+          this.deleteVertexArray(this.vao);
+          gl.deleteProgram(this.program);
+        },
+
+        render: function (renderParameters) {
+          const gl = renderParameters.context;
+          const state = renderParameters.state;
+
+          this.updatePositions(renderParameters);
+
+          if (this.indexBufferSize === 0) return;
+
+          // Transform: map units -> pixels
+          mat3.identity(this.transform);
+          this.screenTranslation[0] = (state.pixelRatio * state.size[0]) / 2;
+          this.screenTranslation[1] = (state.pixelRatio * state.size[1]) / 2;
+          mat3.translate(this.transform, this.transform, this.screenTranslation);
+          mat3.rotate(this.transform, this.transform, (Math.PI * state.rotation) / 180);
+          this.screenScaling[0] = state.pixelRatio / state.resolution;
+          this.screenScaling[1] = -state.pixelRatio / state.resolution;
+          mat3.scale(this.transform, this.transform, this.screenScaling);
+          mat3.translate(this.transform, this.transform, this.translationToCenter);
+
+          // Extrude: line width
+          mat3.identity(this.extrude);
+          mat3.rotate(this.extrude, this.extrude, (Math.PI * state.rotation) / 180);
+          const hw = this.layer.halfWidth || 6;
+          mat3.scale(this.extrude, this.extrude, [hw, -hw, 1]);
+
+          // Display: pixels -> NDC
+          this.display[0] = 2 / (state.pixelRatio * state.size[0]);
+          this.display[4] = -2 / (state.pixelRatio * state.size[1]);
+
+          // Draw
+          gl.useProgram(this.program);
+          gl.uniformMatrix3fv(this.uTransform, false, this.transform);
+          gl.uniformMatrix3fv(this.uExtrude, false, this.extrude);
+          gl.uniformMatrix3fv(this.uDisplay, false, this.display);
+          gl.uniform1f(this.uCurrentTime, performance.now() / 1000.0);
+          gl.uniform1f(this.uTrailSpeed, this.layer.trailSpeed || 50);
+          gl.uniform1f(this.uTrailLength, this.layer.trailLength || 300);
+          gl.uniform1f(this.uTrailCycle, this.layer.trailCycle || 1000);
+
+          this.bindVertexArray(this.vao);
+          gl.enable(gl.BLEND);
+          gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+          gl.drawElements(gl.TRIANGLES, this.indexBufferSize, gl.UNSIGNED_SHORT, 0);
+
+          this.requestRender();
+        },
+
+        updatePositions: function (renderParameters) {
+          const gl = renderParameters.context;
+          const stationary = renderParameters.stationary;
+          const state = renderParameters.state;
+
+          if (!stationary) {
+            vec2.sub(this.translationToCenter, this.centerAtLastUpdate, state.center);
+            this.requestRender();
+            return;
+          }
+
+          if (
+            !this.needsUpdate &&
+            this.translationToCenter[0] === 0 &&
+            this.translationToCenter[1] === 0
+          ) {
+            return;
+          }
+
+          this.centerAtLastUpdate.set(state.center);
+          this.translationToCenter[0] = 0;
+          this.translationToCenter[1] = 0;
+          this.needsUpdate = false;
+
+          const graphics = this.layer.graphics;
+
+          let vtxCount = 0;
+          let idxCount = 0;
+
+          for (let i = 0; i < graphics.items.length; ++i) {
+            const graphic = graphics.items[i];
+            const path = graphic.geometry.paths[0];
+            vtxCount += path.length * 2;
+            idxCount += (path.length - 1) * 6;
+          }
+
+          const vertexData = new ArrayBuffer(7 * vtxCount * 4);
+          const floatData = new Float32Array(vertexData);
+          const colorData = new Uint8Array(vertexData);
+          const indexData = new Uint16Array(idxCount);
+
+          let vtxCursor = 0;
+          let idxCursor = 0;
+
+          for (let i = 0; i < graphics.items.length; ++i) {
+            const graphic = graphics.items[i];
+            const path = graphic.geometry.paths[0];
+            const color = graphic.attributes["color"];
+
+            let s = {};
+
+            for (let j = 0; j < path.length; ++j) {
+              const p = path[j];
+
+              if (s.current) {
+                s.delta = [p[0] - s.current[0], p[1] - s.current[1]];
+                const deltaLength = Math.sqrt(
+                  s.delta[0] * s.delta[0] + s.delta[1] * s.delta[1],
+                );
+                s.direction = [s.delta[0] / deltaLength, s.delta[1] / deltaLength];
+                const normal = [-s.direction[1], s.direction[0]];
+
+                if (s.normal) {
+                  s.offset = [s.normal[0] + normal[0], s.normal[1] + normal[1]];
+                  const offsetLength = Math.sqrt(
+                    s.offset[0] * s.offset[0] + s.offset[1] * s.offset[1],
+                  );
+                  s.offset[0] /= offsetLength;
+                  s.offset[1] /= offsetLength;
+                  const d =
+                    s.normal[0] * s.offset[0] + s.normal[1] * s.offset[1];
+                  s.offset[0] /= d;
+                  s.offset[1] /= d;
+                } else {
+                  s.offset = [normal[0], normal[1]];
+                }
+
+                floatData[vtxCursor * 7 + 0] = s.current[0] - this.centerAtLastUpdate[0];
+                floatData[vtxCursor * 7 + 1] = s.current[1] - this.centerAtLastUpdate[1];
+                floatData[vtxCursor * 7 + 2] = s.offset[0];
+                floatData[vtxCursor * 7 + 3] = s.offset[1];
+                floatData[vtxCursor * 7 + 4] = s.distance;
+                floatData[vtxCursor * 7 + 5] = +1;
+                colorData[4 * (vtxCursor * 7 + 6) + 0] = color[0];
+                colorData[4 * (vtxCursor * 7 + 6) + 1] = color[1];
+                colorData[4 * (vtxCursor * 7 + 6) + 2] = color[2];
+                colorData[4 * (vtxCursor * 7 + 6) + 3] = 255;
+
+                floatData[vtxCursor * 7 + 7] = s.current[0] - this.centerAtLastUpdate[0];
+                floatData[vtxCursor * 7 + 8] = s.current[1] - this.centerAtLastUpdate[1];
+                floatData[vtxCursor * 7 + 9] = -s.offset[0];
+                floatData[vtxCursor * 7 + 10] = -s.offset[1];
+                floatData[vtxCursor * 7 + 11] = s.distance;
+                floatData[vtxCursor * 7 + 12] = -1;
+                colorData[4 * (vtxCursor * 7 + 13) + 0] = color[0];
+                colorData[4 * (vtxCursor * 7 + 13) + 1] = color[1];
+                colorData[4 * (vtxCursor * 7 + 13) + 2] = color[2];
+                colorData[4 * (vtxCursor * 7 + 13) + 3] = 255;
+                vtxCursor += 2;
+
+                if (j >= 2) {
+                  indexData[idxCursor + 0] = vtxCursor - 4;
+                  indexData[idxCursor + 1] = vtxCursor - 3;
+                  indexData[idxCursor + 2] = vtxCursor - 2;
+                  indexData[idxCursor + 3] = vtxCursor - 3;
+                  indexData[idxCursor + 4] = vtxCursor - 1;
+                  indexData[idxCursor + 5] = vtxCursor - 2;
+                  idxCursor += 6;
+                }
+
+                s.normal = normal;
+                s.distance += deltaLength;
+              } else {
+                s.distance = 0;
+              }
+
+              s.current = p;
+            }
+
+            // Last vertex pair
+            s.offset = [s.normal[0], s.normal[1]];
+            floatData[vtxCursor * 7 + 0] = s.current[0] - this.centerAtLastUpdate[0];
+            floatData[vtxCursor * 7 + 1] = s.current[1] - this.centerAtLastUpdate[1];
+            floatData[vtxCursor * 7 + 2] = s.offset[0];
+            floatData[vtxCursor * 7 + 3] = s.offset[1];
+            floatData[vtxCursor * 7 + 4] = s.distance;
+            floatData[vtxCursor * 7 + 5] = +1;
+            colorData[4 * (vtxCursor * 7 + 6) + 0] = color[0];
+            colorData[4 * (vtxCursor * 7 + 6) + 1] = color[1];
+            colorData[4 * (vtxCursor * 7 + 6) + 2] = color[2];
+            colorData[4 * (vtxCursor * 7 + 6) + 3] = 255;
+
+            floatData[vtxCursor * 7 + 7] = s.current[0] - this.centerAtLastUpdate[0];
+            floatData[vtxCursor * 7 + 8] = s.current[1] - this.centerAtLastUpdate[1];
+            floatData[vtxCursor * 7 + 9] = -s.offset[0];
+            floatData[vtxCursor * 7 + 10] = -s.offset[1];
+            floatData[vtxCursor * 7 + 11] = s.distance;
+            floatData[vtxCursor * 7 + 12] = -1;
+            colorData[4 * (vtxCursor * 7 + 13) + 0] = color[0];
+            colorData[4 * (vtxCursor * 7 + 13) + 1] = color[1];
+            colorData[4 * (vtxCursor * 7 + 13) + 2] = color[2];
+            colorData[4 * (vtxCursor * 7 + 13) + 3] = 255;
+            vtxCursor += 2;
+
+            indexData[idxCursor + 0] = vtxCursor - 4;
+            indexData[idxCursor + 1] = vtxCursor - 3;
+            indexData[idxCursor + 2] = vtxCursor - 2;
+            indexData[idxCursor + 3] = vtxCursor - 3;
+            indexData[idxCursor + 4] = vtxCursor - 1;
+            indexData[idxCursor + 5] = vtxCursor - 2;
+            idxCursor += 6;
+
+            s.current = null;
+          }
+
+          gl.bindBuffer(gl.ARRAY_BUFFER, this.vertexBuffer);
+          gl.bufferData(gl.ARRAY_BUFFER, vertexData, gl.STATIC_DRAW);
+          gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, this.indexBuffer);
+          gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, indexData, gl.STATIC_DRAW);
+          this.indexBufferSize = indexData.length;
+        },
+      });
+
+      // ============================================================
+      // Custom Layer
+      // ============================================================
+      const CustomLayer = GraphicsLayer.createSubclass({
+        properties: {
+          trailSpeed: 50,
+          trailLength: 300,
+          trailCycle: 1000,
+          halfWidth: 6,
+        },
+        createLayerView: function (view) {
+          if (view.type === "2d") {
+            return new CustomLayerView2D({
+              view: view,
+              layer: this,
+            });
+          }
+        },
+      });
+
+      // ============================================================
+      // App State
+      // ============================================================
+      let currentCity = "porto";
+      let flowLayer = null;
+
+      const map = new Map({
+        basemap: "dark-gray-vector",
+      });
+
+      const view = new MapView({
+        container: "viewDiv",
+        map: map,
+        center: CITIES.porto.center,
+        zoom: CITIES.porto.zoom,
+        ui: {
+          components: ["zoom", "compass"],
+        },
+      });
+
+      // ============================================================
+      // Load City
+      // ============================================================
+      function loadCity(cityKey) {
+        currentCity = cityKey;
+        const city = CITIES[cityKey];
+
+        // Remove old layer
+        if (flowLayer) {
+          map.layers.remove(flowLayer);
+        }
+
+        // Generate trajectories
+        const trajectories = generateTrajectories(cityKey);
+
+        // Convert to ArcGIS graphics
+        const graphics = trajectories.map((t) => ({
+          attributes: { color: t.color },
+          geometry: webMercatorUtils.geographicToWebMercator({
+            paths: [t.path],
+            type: "polyline",
+            spatialReference: { wkid: 4326 },
+          }),
+        }));
+
+        // Create layer with current UI settings
+        flowLayer = new CustomLayer({
+          graphics: graphics,
+          trailSpeed: parseFloat(document.getElementById("trailSpeed").value),
+          trailLength: parseFloat(document.getElementById("trailLength").value),
+          halfWidth: parseFloat(document.getElementById("lineWidth").value),
+          trailCycle: 1000,
+        });
+
+        map.layers.add(flowLayer);
+
+        // Update view
+        view.goTo({ center: city.center, zoom: city.zoom }, { duration: 1200 });
+
+        // Update UI
+        document.getElementById("cityName").textContent = city.name;
+        document.getElementById("tripCount").textContent =
+          trajectories.length.toLocaleString();
+
+        let totalVerts = 0;
+        for (const t of trajectories) totalVerts += t.path.length * 2;
+        document.getElementById("vertexCount").textContent =
+          totalVerts.toLocaleString();
+
+        // Update city buttons
+        document.querySelectorAll(".city-btn").forEach((btn) => {
+          btn.classList.toggle("active", btn.dataset.city === cityKey);
+        });
+      }
+
+      // ============================================================
+      // UI Controls
+      // ============================================================
+      view.when(() => {
+        // Load initial city
+        loadCity("porto");
+
+        // City buttons
+        document.querySelectorAll(".city-btn").forEach((btn) => {
+          btn.addEventListener("click", () => loadCity(btn.dataset.city));
+        });
+
+        // Trail speed
+        document.getElementById("trailSpeed").addEventListener("input", (e) => {
+          const val = parseFloat(e.target.value);
+          document.getElementById("speedVal").textContent = val;
+          if (flowLayer) flowLayer.trailSpeed = val;
+        });
+
+        // Trail length
+        document.getElementById("trailLength").addEventListener("input", (e) => {
+          const val = parseFloat(e.target.value);
+          document.getElementById("lengthVal").textContent = val;
+          if (flowLayer) flowLayer.trailLength = val;
+        });
+
+        // Line width
+        document.getElementById("lineWidth").addEventListener("input", (e) => {
+          const val = parseFloat(e.target.value);
+          document.getElementById("widthVal").textContent = val;
+          if (flowLayer) flowLayer.halfWidth = val;
+        });
+      });
+    </script>
+  </head>
+
+  <body>
+    <div id="viewDiv"></div>
+
+    <div id="infoPanel">
+      <h1>CityPulse</h1>
+      <div class="subtitle">GPU-Accelerated Urban Traffic Flow</div>
+
+      <div class="divider"></div>
+
+      <div style="margin-bottom: 10px;">
+        <button class="city-btn active" data-city="porto">Porto</button>
+        <button class="city-btn" data-city="la">Los Angeles</button>
+      </div>
+
+      <div class="stat">
+        <span class="stat-label">City</span>
+        <span class="stat-value" id="cityName">Porto, Portugal</span>
+      </div>
+      <div class="stat">
+        <span class="stat-label">Trajectories</span>
+        <span class="stat-value" id="tripCount">0</span>
+      </div>
+      <div class="stat">
+        <span class="stat-label">GPU Vertices</span>
+        <span class="stat-value" id="vertexCount">0</span>
+      </div>
+      <div class="stat">
+        <span class="stat-label">Renderer</span>
+        <span class="badge">WebGL 2.0</span>
+      </div>
+
+      <div class="divider"></div>
+
+      <div class="control-group">
+        <label>Trail Speed <span class="control-value" id="speedVal">50</span></label>
+        <input type="range" id="trailSpeed" min="10" max="200" value="50" />
+      </div>
+
+      <div class="control-group">
+        <label>Trail Length <span class="control-value" id="lengthVal">300</span></label>
+        <input type="range" id="trailLength" min="50" max="800" value="300" />
+      </div>
+
+      <div class="control-group">
+        <label>Line Width <span class="control-value" id="widthVal">6</span></label>
+        <input type="range" id="lineWidth" min="1" max="20" value="6" />
+      </div>
+
+      <div class="divider"></div>
+
+      <div class="legend">
+        <div class="legend-item"><div class="legend-dot" style="background:#00eeff"></div>Cyan</div>
+        <div class="legend-item"><div class="legend-dot" style="background:#ff3278"></div>Pink</div>
+        <div class="legend-item"><div class="legend-dot" style="background:#ffc800"></div>Gold</div>
+        <div class="legend-item"><div class="legend-dot" style="background:#00ffaa"></div>Green</div>
+        <div class="legend-item"><div class="legend-dot" style="background:#8c50ff"></div>Purple</div>
+        <div class="legend-item"><div class="legend-dot" style="background:#ff7800"></div>Orange</div>
+      </div>
+
+      <div class="footer-text">
+        ArcGIS Maps SDK for JavaScript 5.0<br />
+        Custom BaseLayerViewGL2D with GLSL shaders<br />
+        Procedural road-network trajectory generation
+      </div>
+    </div>
+  </body>
+</html>
