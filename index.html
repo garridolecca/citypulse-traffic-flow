@@ -164,6 +164,25 @@
         color: #00eeff;
       }
 
+      #loadingOverlay {
+        position: absolute;
+        top: 0; left: 0; right: 0; bottom: 0;
+        background: rgba(10, 10, 20, 0.8);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        z-index: 200;
+        color: #00eeff;
+        font-family: 'Segoe UI', system-ui, sans-serif;
+        font-size: 14px;
+        transition: opacity 0.4s;
+      }
+
+      #loadingOverlay.hidden {
+        opacity: 0;
+        pointer-events: none;
+      }
+
       @media (max-width: 600px) {
         #infoPanel { width: 220px; padding: 14px; top: 10px; right: 10px; }
       }
@@ -187,238 +206,32 @@
       ]);
 
       // ============================================================
-      // Seeded PRNG for reproducible trajectories
-      // ============================================================
-      function mulberry32(a) {
-        return function () {
-          a |= 0;
-          a = (a + 0x6d2b79f5) | 0;
-          let t = Math.imul(a ^ (a >>> 15), 1 | a);
-          t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-          return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-        };
-      }
-
-      // ============================================================
       // City Configurations
       // ============================================================
       const CITIES = {
         porto: {
           name: "Porto, Portugal",
-          center: [-8.615, 41.150],
+          center: [-8.615, 41.155],
           zoom: 14,
-          nodes: [
-            [-8.6105, 41.1455], // 0  São Bento Station
-            [-8.6138, 41.1459], // 1  Clérigos
-            [-8.6058, 41.1488], // 2  Bolhão Market
-            [-8.6130, 41.1407], // 3  Ribeira
-            [-8.5955, 41.1467], // 4  Campanhã Station
-            [-8.6306, 41.1580], // 5  Casa da Música
-            [-8.6380, 41.1530], // 6  Boavista
-            [-8.6200, 41.1520], // 7  Cedofeita
-            [-8.6200, 41.1620], // 8  Constituição
-            [-8.6020, 41.1580], // 9  Marquês
-            [-8.5900, 41.1550], // 10 Bonfim
-            [-8.5834, 41.1615], // 11 Estádio do Dragão
-            [-8.6020, 41.1700], // 12 Paranhos
-            [-8.6100, 41.1830], // 13 Hospital S. João
-            [-8.6450, 41.1670], // 14 Francos
-            [-8.6550, 41.1750], // 15 Ramalde
-            [-8.6700, 41.1850], // 16 Matosinhos Sul
-            [-8.6480, 41.1500], // 17 Lordelo
-            [-8.6600, 41.1560], // 18 Foz do Douro
-            [-8.6350, 41.1450], // 19 Massarelos
-            [-8.5950, 41.1350], // 20 V.N. Gaia
-            [-8.6100, 41.1350], // 21 Gaia Center
-            [-8.6300, 41.1380], // 22 Gaia West
-            [-8.6250, 41.1750], // 23 Amial
-            [-8.5750, 41.1420], // 24 Gaia East
-            [-8.6180, 41.1480], // 25 Aliados
-            [-8.5880, 41.1480], // 26 Antas
-            [-8.6050, 41.1400], // 27 Ponte D. Luís I
-            [-8.6320, 41.1630], // 28 Carolina Michaelis
-            [-8.6150, 41.1580], // 29 Lapa
-          ],
-          edges: [
-            [0, 1], [0, 2], [0, 3], [0, 25], [0, 27],
-            [1, 7], [1, 19], [1, 25],
-            [2, 4], [2, 9], [2, 7], [2, 25], [2, 26],
-            [3, 20], [3, 21], [3, 19], [3, 27],
-            [4, 10], [4, 11], [4, 26],
-            [5, 6], [5, 7], [5, 8], [5, 14], [5, 28],
-            [6, 17], [6, 19], [6, 7],
-            [7, 8], [7, 9], [7, 25], [7, 29],
-            [8, 9], [8, 12], [8, 14], [8, 23], [8, 28], [8, 29],
-            [9, 10], [9, 12], [9, 29],
-            [10, 11], [10, 26],
-            [11, 24],
-            [12, 13], [12, 23],
-            [13, 23],
-            [14, 15], [14, 28],
-            [15, 16], [15, 23],
-            [16, 18],
-            [17, 18], [17, 19],
-            [19, 22],
-            [20, 21], [20, 24], [20, 27],
-            [21, 22], [21, 27],
-            [25, 7], [25, 29],
-            [26, 11],
-            [28, 29], [28, 14],
-          ],
-          trajectoryCount: 600,
+          dataFile: "data/porto-roads.json",
         },
-
         la: {
           name: "Los Angeles, CA",
-          center: [-118.25, 34.05],
-          zoom: 12,
-          nodes: [
-            [-118.2437, 34.0522], // 0  Downtown / City Hall
-            [-118.2553, 34.0488], // 1  Financial District
-            [-118.2673, 34.0430], // 2  Convention Center
-            [-118.2330, 34.0580], // 3  Arts District
-            [-118.2200, 34.0560], // 4  Boyle Heights
-            [-118.2980, 34.0620], // 5  Koreatown
-            [-118.3287, 34.0690], // 6  Wilshire / La Brea
-            [-118.3580, 34.0600], // 7  Beverly Center
-            [-118.3890, 34.0580], // 8  Beverly Hills
-            [-118.4100, 34.0530], // 9  Century City
-            [-118.2860, 34.0230], // 10 USC / Exposition
-            [-118.2600, 34.0240], // 11 South LA
-            [-118.3080, 34.0210], // 12 Leimert Park
-            [-118.2440, 34.0770], // 13 Echo Park
-            [-118.2600, 34.0780], // 14 Silver Lake
-            [-118.2810, 34.0990], // 15 Los Feliz
-            [-118.3270, 34.1020], // 16 Hollywood
-            [-118.3520, 34.1010], // 17 West Hollywood
-            [-118.3960, 34.0810], // 18 Westwood / UCLA
-            [-118.4430, 34.0340], // 19 Santa Monica
-            [-118.4560, 34.0080], // 20 Venice
-            [-118.3920, 34.0230], // 21 Culver City
-            [-118.3530, 34.0280], // 22 Mid-City
-            [-118.2050, 34.0670], // 23 Lincoln Heights
-            [-118.1880, 34.0560], // 24 East LA
-            [-118.3360, 34.0430], // 25 Miracle Mile
-            [-118.2680, 34.0620], // 26 Westlake
-            [-118.3000, 34.0830], // 27 Larchmont
-            [-118.3680, 34.1380], // 28 Universal City
-            [-118.3260, 34.1430], // 29 Burbank (Media)
-          ],
-          edges: [
-            [0, 1], [0, 3], [0, 13], [0, 26], [0, 11],
-            [1, 2], [1, 5], [1, 26],
-            [2, 10], [2, 11], [2, 1],
-            [3, 4], [3, 13], [3, 23],
-            [4, 24], [4, 23],
-            [5, 6], [5, 26], [5, 27], [5, 10],
-            [6, 7], [6, 25], [6, 27], [6, 16],
-            [7, 8], [7, 17], [7, 25],
-            [8, 9], [8, 18], [8, 17],
-            [9, 18], [9, 21],
-            [10, 11], [10, 12], [10, 22],
-            [11, 12],
-            [12, 22], [12, 21],
-            [13, 14], [13, 23], [13, 26],
-            [14, 15], [14, 26], [14, 27],
-            [15, 16], [15, 27], [15, 29],
-            [16, 17], [16, 28], [16, 29],
-            [17, 18], [17, 28],
-            [18, 19], [18, 21],
-            [19, 20], [19, 21],
-            [20, 21],
-            [21, 22],
-            [22, 25],
-            [25, 7], [25, 22],
-            [26, 5], [26, 14],
-            [27, 16], [27, 15],
-            [28, 29],
-          ],
-          trajectoryCount: 500,
+          center: [-118.32, 34.05],
+          zoom: 13,
+          dataFile: "data/la-roads.json",
         },
       };
 
-      // ============================================================
-      // Color Palette
-      // ============================================================
-      const COLORS = [
-        [0, 238, 255],   // electric cyan
-        [255, 50, 120],  // hot pink
-        [255, 200, 0],   // gold
-        [0, 255, 170],   // spring green
-        [140, 80, 255],  // purple
-        [255, 120, 0],   // orange
-        [0, 191, 255],   // sky blue
-        [255, 70, 70],   // coral
-        [80, 255, 80],   // neon green
-        [255, 160, 240], // pink
-        [0, 200, 200],   // teal
-        [255, 255, 100], // yellow
-      ];
+      // Data cache
+      const dataCache = {};
 
-      // ============================================================
-      // Trajectory Generator
-      // ============================================================
-      function generateTrajectories(cityKey) {
-        const city = CITIES[cityKey];
-        const random = mulberry32(12345);
-        const { nodes, edges, trajectoryCount } = city;
-
-        // Build adjacency
-        const adj = {};
-        for (let i = 0; i < nodes.length; i++) adj[i] = [];
-        for (const [a, b] of edges) {
-          adj[a].push(b);
-          adj[b].push(a);
-        }
-
-        const trajectories = [];
-
-        for (let t = 0; t < trajectoryCount; t++) {
-          // Random walk of 4-10 steps
-          const walkLength = 4 + Math.floor(random() * 7);
-          const start = Math.floor(random() * nodes.length);
-          const walk = [start];
-          let current = start;
-
-          for (let step = 0; step < walkLength; step++) {
-            const neighbors = adj[current];
-            if (!neighbors || neighbors.length === 0) break;
-
-            // Avoid immediate backtrack
-            let next;
-            let attempts = 0;
-            do {
-              next = neighbors[Math.floor(random() * neighbors.length)];
-              attempts++;
-            } while (walk.length > 1 && next === walk[walk.length - 2] && attempts < 5);
-
-            walk.push(next);
-            current = next;
-          }
-
-          if (walk.length < 2) continue;
-
-          // Interpolate path between nodes
-          const path = [];
-          for (let i = 0; i < walk.length - 1; i++) {
-            const from = nodes[walk[i]];
-            const to = nodes[walk[i + 1]];
-            const segments = 3 + Math.floor(random() * 4);
-
-            for (let s = 0; s <= segments; s++) {
-              if (i > 0 && s === 0) continue; // avoid duplicates at joins
-              const frac = s / segments;
-              const lng = from[0] + (to[0] - from[0]) * frac + (random() - 0.5) * 0.0008;
-              const lat = from[1] + (to[1] - from[1]) * frac + (random() - 0.5) * 0.0008;
-              path.push([lng, lat]);
-            }
-          }
-
-          const color = COLORS[t % COLORS.length];
-          trajectories.push({ path, color });
-        }
-
-        return trajectories;
+      async function loadCityData(cityKey) {
+        if (dataCache[cityKey]) return dataCache[cityKey];
+        const resp = await fetch(CITIES[cityKey].dataFile);
+        const data = await resp.json();
+        dataCache[cityKey] = data;
+        return data;
       }
 
       // ============================================================
@@ -689,6 +502,13 @@
                 const deltaLength = Math.sqrt(
                   s.delta[0] * s.delta[0] + s.delta[1] * s.delta[1],
                 );
+
+                // Skip zero-length segments
+                if (deltaLength < 0.001) {
+                  s.current = p;
+                  continue;
+                }
+
                 s.direction = [s.delta[0] / deltaLength, s.delta[1] / deltaLength];
                 const normal = [-s.direction[1], s.direction[0]];
 
@@ -697,12 +517,16 @@
                   const offsetLength = Math.sqrt(
                     s.offset[0] * s.offset[0] + s.offset[1] * s.offset[1],
                   );
-                  s.offset[0] /= offsetLength;
-                  s.offset[1] /= offsetLength;
-                  const d =
-                    s.normal[0] * s.offset[0] + s.normal[1] * s.offset[1];
-                  s.offset[0] /= d;
-                  s.offset[1] /= d;
+                  if (offsetLength > 0.001) {
+                    s.offset[0] /= offsetLength;
+                    s.offset[1] /= offsetLength;
+                    const d =
+                      s.normal[0] * s.offset[0] + s.normal[1] * s.offset[1];
+                    if (Math.abs(d) > 0.001) {
+                      s.offset[0] /= d;
+                      s.offset[1] /= d;
+                    }
+                  }
                 } else {
                   s.offset = [normal[0], normal[1]];
                 }
@@ -750,46 +574,49 @@
             }
 
             // Last vertex pair
-            s.offset = [s.normal[0], s.normal[1]];
-            floatData[vtxCursor * 7 + 0] = s.current[0] - this.centerAtLastUpdate[0];
-            floatData[vtxCursor * 7 + 1] = s.current[1] - this.centerAtLastUpdate[1];
-            floatData[vtxCursor * 7 + 2] = s.offset[0];
-            floatData[vtxCursor * 7 + 3] = s.offset[1];
-            floatData[vtxCursor * 7 + 4] = s.distance;
-            floatData[vtxCursor * 7 + 5] = +1;
-            colorData[4 * (vtxCursor * 7 + 6) + 0] = color[0];
-            colorData[4 * (vtxCursor * 7 + 6) + 1] = color[1];
-            colorData[4 * (vtxCursor * 7 + 6) + 2] = color[2];
-            colorData[4 * (vtxCursor * 7 + 6) + 3] = 255;
+            if (s.normal) {
+              s.offset = [s.normal[0], s.normal[1]];
+              floatData[vtxCursor * 7 + 0] = s.current[0] - this.centerAtLastUpdate[0];
+              floatData[vtxCursor * 7 + 1] = s.current[1] - this.centerAtLastUpdate[1];
+              floatData[vtxCursor * 7 + 2] = s.offset[0];
+              floatData[vtxCursor * 7 + 3] = s.offset[1];
+              floatData[vtxCursor * 7 + 4] = s.distance;
+              floatData[vtxCursor * 7 + 5] = +1;
+              colorData[4 * (vtxCursor * 7 + 6) + 0] = color[0];
+              colorData[4 * (vtxCursor * 7 + 6) + 1] = color[1];
+              colorData[4 * (vtxCursor * 7 + 6) + 2] = color[2];
+              colorData[4 * (vtxCursor * 7 + 6) + 3] = 255;
 
-            floatData[vtxCursor * 7 + 7] = s.current[0] - this.centerAtLastUpdate[0];
-            floatData[vtxCursor * 7 + 8] = s.current[1] - this.centerAtLastUpdate[1];
-            floatData[vtxCursor * 7 + 9] = -s.offset[0];
-            floatData[vtxCursor * 7 + 10] = -s.offset[1];
-            floatData[vtxCursor * 7 + 11] = s.distance;
-            floatData[vtxCursor * 7 + 12] = -1;
-            colorData[4 * (vtxCursor * 7 + 13) + 0] = color[0];
-            colorData[4 * (vtxCursor * 7 + 13) + 1] = color[1];
-            colorData[4 * (vtxCursor * 7 + 13) + 2] = color[2];
-            colorData[4 * (vtxCursor * 7 + 13) + 3] = 255;
-            vtxCursor += 2;
+              floatData[vtxCursor * 7 + 7] = s.current[0] - this.centerAtLastUpdate[0];
+              floatData[vtxCursor * 7 + 8] = s.current[1] - this.centerAtLastUpdate[1];
+              floatData[vtxCursor * 7 + 9] = -s.offset[0];
+              floatData[vtxCursor * 7 + 10] = -s.offset[1];
+              floatData[vtxCursor * 7 + 11] = s.distance;
+              floatData[vtxCursor * 7 + 12] = -1;
+              colorData[4 * (vtxCursor * 7 + 13) + 0] = color[0];
+              colorData[4 * (vtxCursor * 7 + 13) + 1] = color[1];
+              colorData[4 * (vtxCursor * 7 + 13) + 2] = color[2];
+              colorData[4 * (vtxCursor * 7 + 13) + 3] = 255;
+              vtxCursor += 2;
 
-            indexData[idxCursor + 0] = vtxCursor - 4;
-            indexData[idxCursor + 1] = vtxCursor - 3;
-            indexData[idxCursor + 2] = vtxCursor - 2;
-            indexData[idxCursor + 3] = vtxCursor - 3;
-            indexData[idxCursor + 4] = vtxCursor - 1;
-            indexData[idxCursor + 5] = vtxCursor - 2;
-            idxCursor += 6;
+              indexData[idxCursor + 0] = vtxCursor - 4;
+              indexData[idxCursor + 1] = vtxCursor - 3;
+              indexData[idxCursor + 2] = vtxCursor - 2;
+              indexData[idxCursor + 3] = vtxCursor - 3;
+              indexData[idxCursor + 4] = vtxCursor - 1;
+              indexData[idxCursor + 5] = vtxCursor - 2;
+              idxCursor += 6;
+            }
 
             s.current = null;
           }
 
+          // Upload only the used portion of the buffers
           gl.bindBuffer(gl.ARRAY_BUFFER, this.vertexBuffer);
-          gl.bufferData(gl.ARRAY_BUFFER, vertexData, gl.STATIC_DRAW);
+          gl.bufferData(gl.ARRAY_BUFFER, floatData.buffer.slice(0, vtxCursor * 28), gl.STATIC_DRAW);
           gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, this.indexBuffer);
-          gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, indexData, gl.STATIC_DRAW);
-          this.indexBufferSize = indexData.length;
+          gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, indexData.buffer.slice(0, idxCursor * 2), gl.STATIC_DRAW);
+          this.indexBufferSize = idxCursor;
         },
       });
 
@@ -816,7 +643,7 @@
       // ============================================================
       // App State
       // ============================================================
-      let currentCity = "porto";
+      let currentCity = "la";
       let flowLayer = null;
 
       const map = new Map({
@@ -826,8 +653,8 @@
       const view = new MapView({
         container: "viewDiv",
         map: map,
-        center: CITIES.porto.center,
-        zoom: CITIES.porto.zoom,
+        center: CITIES.la.center,
+        zoom: CITIES.la.zoom,
         ui: {
           components: ["zoom", "compass"],
         },
@@ -836,17 +663,22 @@
       // ============================================================
       // Load City
       // ============================================================
-      function loadCity(cityKey) {
+      async function loadCity(cityKey) {
         currentCity = cityKey;
         const city = CITIES[cityKey];
+
+        // Show loading
+        const overlay = document.getElementById("loadingOverlay");
+        overlay.classList.remove("hidden");
+        overlay.textContent = `Loading ${city.name} road network...`;
 
         // Remove old layer
         if (flowLayer) {
           map.layers.remove(flowLayer);
         }
 
-        // Generate trajectories
-        const trajectories = generateTrajectories(cityKey);
+        // Load real road data
+        const trajectories = await loadCityData(cityKey);
 
         // Convert to ArcGIS graphics
         const graphics = trajectories.map((t) => ({
@@ -886,35 +718,33 @@
         document.querySelectorAll(".city-btn").forEach((btn) => {
           btn.classList.toggle("active", btn.dataset.city === cityKey);
         });
+
+        // Hide loading
+        setTimeout(() => overlay.classList.add("hidden"), 500);
       }
 
       // ============================================================
       // UI Controls
       // ============================================================
       view.when(() => {
-        // Load initial city
-        loadCity("porto");
+        loadCity("la");
 
-        // City buttons
         document.querySelectorAll(".city-btn").forEach((btn) => {
           btn.addEventListener("click", () => loadCity(btn.dataset.city));
         });
 
-        // Trail speed
         document.getElementById("trailSpeed").addEventListener("input", (e) => {
           const val = parseFloat(e.target.value);
           document.getElementById("speedVal").textContent = val;
           if (flowLayer) flowLayer.trailSpeed = val;
         });
 
-        // Trail length
         document.getElementById("trailLength").addEventListener("input", (e) => {
           const val = parseFloat(e.target.value);
           document.getElementById("lengthVal").textContent = val;
           if (flowLayer) flowLayer.trailLength = val;
         });
 
-        // Line width
         document.getElementById("lineWidth").addEventListener("input", (e) => {
           const val = parseFloat(e.target.value);
           document.getElementById("widthVal").textContent = val;
@@ -926,6 +756,7 @@
 
   <body>
     <div id="viewDiv"></div>
+    <div id="loadingOverlay">Loading...</div>
 
     <div id="infoPanel">
       <h1>CityPulse</h1>
@@ -934,16 +765,16 @@
       <div class="divider"></div>
 
       <div style="margin-bottom: 10px;">
-        <button class="city-btn active" data-city="porto">Porto</button>
-        <button class="city-btn" data-city="la">Los Angeles</button>
+        <button class="city-btn" data-city="porto">Porto</button>
+        <button class="city-btn active" data-city="la">Los Angeles</button>
       </div>
 
       <div class="stat">
         <span class="stat-label">City</span>
-        <span class="stat-value" id="cityName">Porto, Portugal</span>
+        <span class="stat-value" id="cityName">Los Angeles, CA</span>
       </div>
       <div class="stat">
-        <span class="stat-label">Trajectories</span>
+        <span class="stat-label">Road Segments</span>
         <span class="stat-value" id="tripCount">0</span>
       </div>
       <div class="stat">
@@ -975,18 +806,18 @@
       <div class="divider"></div>
 
       <div class="legend">
-        <div class="legend-item"><div class="legend-dot" style="background:#00eeff"></div>Cyan</div>
-        <div class="legend-item"><div class="legend-dot" style="background:#ff3278"></div>Pink</div>
-        <div class="legend-item"><div class="legend-dot" style="background:#ffc800"></div>Gold</div>
-        <div class="legend-item"><div class="legend-dot" style="background:#00ffaa"></div>Green</div>
-        <div class="legend-item"><div class="legend-dot" style="background:#8c50ff"></div>Purple</div>
-        <div class="legend-item"><div class="legend-dot" style="background:#ff7800"></div>Orange</div>
+        <div class="legend-item"><div class="legend-dot" style="background:#00eeff"></div>Freeways</div>
+        <div class="legend-item"><div class="legend-dot" style="background:#ff7800"></div>Trunk Roads</div>
+        <div class="legend-item"><div class="legend-dot" style="background:#ff3278"></div>Primary</div>
+        <div class="legend-item"><div class="legend-dot" style="background:#ffc800"></div>Primary</div>
+        <div class="legend-item"><div class="legend-dot" style="background:#00ffaa"></div>Primary</div>
+        <div class="legend-item"><div class="legend-dot" style="background:#8c50ff"></div>Primary</div>
       </div>
 
       <div class="footer-text">
         ArcGIS Maps SDK for JavaScript 5.0<br />
         Custom BaseLayerViewGL2D with GLSL shaders<br />
-        Procedural road-network trajectory generation
+        Road geometry: OpenStreetMap via Overpass API
       </div>
     </div>
   </body>

@@ -8,7 +8,7 @@ Real-time animated traffic flow visualization using ArcGIS Maps SDK for JavaScri
 
 - **Custom WebGL 2.0 Rendering** - Animated polyline trails via `BaseLayerViewGL2D` with GLSL vertex/fragment shaders
 - **Multi-City Support** - Switch between Porto (Portugal) and Los Angeles (CA)
-- **Procedural Trajectory Generation** - Seeded PRNG builds hundreds of realistic routes from a road-network graph
+- **Real Road Geometry** - Actual street networks from OpenStreetMap via Overpass API (motorway, trunk, primary roads)
 - **Interactive Controls** - Adjust trail speed, length, and line width in real time
 - **Additive Blending** - Glowing trail effect with gaussian edge falloff and bright leading heads
 
@@ -16,9 +16,9 @@ Real-time animated traffic flow visualization using ArcGIS Maps SDK for JavaScri
 
 ### Rendering Pipeline
 
-1. A road-network graph (nodes = intersections, edges = road segments) is defined for each city
-2. A seeded random walk algorithm generates 500-600 trajectories through the graph
-3. Trajectories are converted to ArcGIS polyline geometries (geographic → Web Mercator)
+1. Road geometry (motorway, trunk, primary) is fetched from OpenStreetMap via Overpass API
+2. Connected way segments are merged into longer chains; long chains are split into overlapping sub-paths for denser animation
+3. Road polylines are converted to ArcGIS geometries (geographic → Web Mercator)
 4. A custom `BaseLayerViewGL2D` subclass triangulates polylines into extruded quads on the GPU
 5. A GLSL fragment shader animates a trail head traveling along each polyline using `mod(distance - time * speed, cycle)`
 6. Additive blending (`gl.blendFunc(ONE, ONE_MINUS_SRC_ALPHA)`) creates the glow effect
@@ -48,12 +48,12 @@ gl_FragColor = v_color * trail * edge;
 
 ## Data Sources
 
-| City | Source | Notes |
-|------|--------|-------|
-| Porto | Procedural graph | 30 nodes, ~60 edges based on real Porto intersections |
-| Los Angeles | Procedural graph | 30 nodes, ~60 edges covering Downtown to Santa Monica |
+| City | Source | Segments | Notes |
+|------|--------|----------|-------|
+| Los Angeles | OpenStreetMap (Overpass API) | ~2,500 | Motorway, trunk, and primary roads |
+| Porto | OpenStreetMap (Overpass API) | ~1,300 | Motorway, trunk, and primary roads |
 
-For real trajectory data, the [Porto Taxi Trajectory dataset](https://www.kaggle.com/datasets/crailtap/taxi-trajectory) (1.7M trips with full GPS polylines) can be plugged directly into this visualization.
+Road geometry is sourced from OpenStreetMap via the Overpass API, ensuring animated lines follow actual street networks. Connected way segments are merged into longer chains for smoother trail animation.
 
 ## Roadmap
 
