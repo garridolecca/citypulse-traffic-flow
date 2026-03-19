@@ -655,6 +655,9 @@
         map: map,
         center: CITIES.la.center,
         zoom: CITIES.la.zoom,
+        constraints: {
+          minZoom: 11,
+        },
         ui: {
           components: ["zoom", "compass"],
         },
