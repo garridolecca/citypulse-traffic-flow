@@ -221,6 +221,12 @@
           zoom: 13,
           dataFile: "data/la-roads.json",
         },
+        nyc: {
+          name: "New York City (Original Sample)",
+          center: [-74.006, 40.7128],
+          zoom: 15,
+          dataFile: "https://arcgis.github.io/arcgis-samples-javascript/sample-data/custom-gl-animated-lines/lines.json",
+        },
       };
 
       // Data cache
@@ -676,6 +682,15 @@
           if (sub.length >= 2) trajectories.push({ path: sub, color: t.color });
         }
 
+        // Diagnostics
+        const totalPts = trajectories.reduce((s, t) => s + t.path.length, 0);
+        const vtxCount = totalPts * 2;
+        const idxCount = trajectories.reduce((s, t) => s + (t.path.length - 1) * 6, 0);
+        console.log(`[CityPulse] ${cityKey}: ${trajectories.length} trajectories, ${totalPts} points`);
+        console.log(`[CityPulse] GPU: ${vtxCount} vertices, ${idxCount} indices`);
+        console.log(`[CityPulse] Uint16 safe: vtx=${vtxCount < 65536}, idx values=${vtxCount < 65536}`);
+        console.log(`[CityPulse] Path lengths:`, trajectories.slice(0, 10).map(t => t.path.length));
+
         // Convert to ArcGIS graphics
         const graphics = trajectories.map((t) => ({
           attributes: { color: t.color },
@@ -763,6 +778,7 @@
       <div style="margin-bottom: 10px;">
         <button class="city-btn" data-city="porto">Porto</button>
         <button class="city-btn active" data-city="la">Los Angeles</button>
+        <button class="city-btn" data-city="nyc">NYC (test)</button>
       </div>
 
       <div class="stat">
