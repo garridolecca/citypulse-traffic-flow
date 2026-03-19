@@ -290,7 +290,7 @@
           name: "Los Angeles County",
           center: [-118.30, 34.20],
           zoom: 10,
-          dataFile: "data/la-roads.json?v=2",
+          dataFile: "data/la-county.json",
         },
         nyc: {
           name: "New York City (Original Sample)",
@@ -305,8 +305,13 @@
 
       async function loadCityData(cityKey) {
         if (dataCache[cityKey]) return dataCache[cityKey];
-        const resp = await fetch(CITIES[cityKey].dataFile);
+        const url = CITIES[cityKey].dataFile;
+        console.log(`[CityPulse] Fetching: ${url}`);
+        const resp = await fetch(url);
+        const bytes = parseInt(resp.headers.get('content-length') || '0');
+        console.log(`[CityPulse] Response: ${resp.status}, ~${(bytes/1024).toFixed(0)} KB`);
         const data = await resp.json();
+        console.log(`[CityPulse] Loaded ${data.length} trajectories from ${url}`);
         dataCache[cityKey] = data;
         return data;
       }
