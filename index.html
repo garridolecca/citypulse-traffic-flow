@@ -235,7 +235,7 @@
       }
 
       // ============================================================
-      // Custom Layer View (WebGL Animated Lines)
+      // Custom Layer View — exact original ArcGIS sample renderer
       // ============================================================
       const CustomLayerView2D = BaseLayerViewGL2D.createSubclass({
         aPosition: 0,
@@ -262,28 +262,21 @@
             this.requestRender();
           };
 
-          this.watcher = reactiveUtils.on(
-            () => this.layer.graphics,
-            "change",
-            requestUpdate,
-          );
+          this.watcher = reactiveUtils.on(() => this.layer.graphics, "change", requestUpdate);
 
           const vertexSource = `
             precision highp float;
             uniform mat3 u_transform;
             uniform mat3 u_extrude;
             uniform mat3 u_display;
-
             attribute vec2 a_position;
             attribute vec2 a_offset;
             attribute float a_distance;
             attribute float a_side;
             attribute vec4 a_color;
-
             varying float v_distance;
             varying float v_side;
             varying vec4 v_color;
-
             void main(void) {
               gl_Position.xy = (u_display * (u_transform * vec3(a_position, 1.0) + u_extrude * vec3(a_offset, 0.0))).xy;
               gl_Position.zw = vec2(0.0, 1.0);
@@ -298,33 +291,20 @@
             uniform float u_trail_speed;
             uniform float u_trail_length;
             uniform float u_trail_cycle;
-
             varying float v_distance;
             varying float v_side;
             varying vec4 v_color;
-
             void main(void) {
               float d = mod(v_distance - u_current_time * u_trail_speed, u_trail_cycle);
-
-              // Trail body with smooth falloff
-              float trail = d < u_trail_length ? smoothstep(0.0, 1.0, d / u_trail_length) : 0.0;
-
-              // Bright leading head
-              float head = d > u_trail_length * 0.85 && d < u_trail_length
-                ? (d - u_trail_length * 0.85) / (u_trail_length * 0.15) * 0.8
-                : 0.0;
-
-              // Edge softness
-              float edge = exp(-abs(v_side) * 3.0);
-
-              float a = (trail + head) * edge;
+              float a1 = d < u_trail_length ? mix(0.0, 1.0, d / u_trail_length) : 0.0;
+              float a2 = exp(-abs(v_side) * 3.0);
+              float a = a1 * a2;
               gl_FragColor = v_color * a;
             }`;
 
           const vertexShader = gl.createShader(gl.VERTEX_SHADER);
           gl.shaderSource(vertexShader, vertexSource);
           gl.compileShader(vertexShader);
-
           const fragmentShader = gl.createShader(gl.FRAGMENT_SHADER);
           gl.shaderSource(fragmentShader, fragmentSource);
           gl.compileShader(fragmentShader);
@@ -332,13 +312,11 @@
           this.program = gl.createProgram();
           gl.attachShader(this.program, vertexShader);
           gl.attachShader(this.program, fragmentShader);
-
           gl.bindAttribLocation(this.program, this.aPosition, "a_position");
           gl.bindAttribLocation(this.program, this.aOffset, "a_offset");
           gl.bindAttribLocation(this.program, this.aDistance, "a_distance");
           gl.bindAttribLocation(this.program, this.aSide, "a_side");
           gl.bindAttribLocation(this.program, this.aColor, "a_color");
-
           gl.linkProgram(this.program);
           gl.deleteShader(vertexShader);
           gl.deleteShader(fragmentShader);
@@ -360,10 +338,10 @@
             this.bindVertexArray = (vao) => gl.bindVertexArray(vao);
             this.deleteVertexArray = (vao) => gl.deleteVertexArray(vao);
           } else {
-            const ext = gl.getExtension("OES_vertex_array_object");
-            this.vao = ext.createVertexArrayOES();
-            this.bindVertexArray = (vao) => ext.bindVertexArrayOES(vao);
-            this.deleteVertexArray = (vao) => ext.deleteVertexArrayOES(vao);
+            const vaoExt = gl.getExtension("OES_vertex_array_object");
+            this.vao = vaoExt.createVertexArrayOES();
+            this.bindVertexArray = (vao) => vaoExt.bindVertexArrayOES(vao);
+            this.deleteVertexArray = (vao) => vaoExt.deleteVertexArrayOES(vao);
           }
 
           this.bindVertexArray(this.vao);
@@ -404,7 +382,6 @@
 
           if (this.indexBufferSize === 0) return;
 
-          // Transform: map units -> pixels
           mat3.identity(this.transform);
           this.screenTranslation[0] = (state.pixelRatio * state.size[0]) / 2;
           this.screenTranslation[1] = (state.pixelRatio * state.size[1]) / 2;
@@ -415,17 +392,14 @@
           mat3.scale(this.transform, this.transform, this.screenScaling);
           mat3.translate(this.transform, this.transform, this.translationToCenter);
 
-          // Extrude: line width
           mat3.identity(this.extrude);
           mat3.rotate(this.extrude, this.extrude, (Math.PI * state.rotation) / 180);
-          const hw = this.layer.halfWidth || 6;
-          mat3.scale(this.extrude, this.extrude, [hw, -hw, 1]);
+          const HALF_WIDTH = this.layer.halfWidth || 6;
+          mat3.scale(this.extrude, this.extrude, [HALF_WIDTH, -HALF_WIDTH, 1]);
 
-          // Display: pixels -> NDC
           this.display[0] = 2 / (state.pixelRatio * state.size[0]);
           this.display[4] = -2 / (state.pixelRatio * state.size[1]);
 
-          // Draw
           gl.useProgram(this.program);
           gl.uniformMatrix3fv(this.uTransform, false, this.transform);
           gl.uniformMatrix3fv(this.uExtrude, false, this.extrude);
@@ -434,7 +408,6 @@
           gl.uniform1f(this.uTrailSpeed, this.layer.trailSpeed || 50);
           gl.uniform1f(this.uTrailLength, this.layer.trailLength || 300);
           gl.uniform1f(this.uTrailCycle, this.layer.trailCycle || 1000);
-
           this.bindVertexArray(this.vao);
           gl.enable(gl.BLEND);
           gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
@@ -443,6 +416,7 @@
           this.requestRender();
         },
 
+        // Exact original ArcGIS sample triangulation — no modifications
         updatePositions: function (renderParameters) {
           const gl = renderParameters.context;
           const stationary = renderParameters.stationary;
@@ -493,42 +467,30 @@
             const color = graphic.attributes["color"];
 
             let s = {};
-            // Track emitted vertex pairs per path for correct indexing
-            let emittedPairs = 0;
 
             for (let j = 0; j < path.length; ++j) {
               const p = path[j];
 
               if (s.current) {
                 s.delta = [p[0] - s.current[0], p[1] - s.current[1]];
-                const deltaLength = Math.sqrt(
-                  s.delta[0] * s.delta[0] + s.delta[1] * s.delta[1],
-                );
 
-                // Skip zero/near-zero-length segments (prevents NaN)
-                if (deltaLength < 0.01) {
-                  s.current = p;
-                  continue;
-                }
-
+                const deltaLength = Math.sqrt(s.delta[0] * s.delta[0] + s.delta[1] * s.delta[1]);
                 s.direction = [s.delta[0] / deltaLength, s.delta[1] / deltaLength];
+
                 const normal = [-s.direction[1], s.direction[0]];
 
                 if (s.normal) {
                   s.offset = [s.normal[0] + normal[0], s.normal[1] + normal[1]];
+
                   const offsetLength = Math.sqrt(
                     s.offset[0] * s.offset[0] + s.offset[1] * s.offset[1],
                   );
-                  if (offsetLength > 0.001) {
-                    s.offset[0] /= offsetLength;
-                    s.offset[1] /= offsetLength;
-                    const d =
-                      s.normal[0] * s.offset[0] + s.normal[1] * s.offset[1];
-                    if (Math.abs(d) > 0.001) {
-                      s.offset[0] /= d;
-                      s.offset[1] /= d;
-                    }
-                  }
+                  s.offset[0] /= offsetLength;
+                  s.offset[1] /= offsetLength;
+
+                  const d = s.normal[0] * s.offset[0] + s.normal[1] * s.offset[1];
+                  s.offset[0] /= d;
+                  s.offset[1] /= d;
                 } else {
                   s.offset = [normal[0], normal[1]];
                 }
@@ -555,10 +517,8 @@
                 colorData[4 * (vtxCursor * 7 + 13) + 2] = color[2];
                 colorData[4 * (vtxCursor * 7 + 13) + 3] = 255;
                 vtxCursor += 2;
-                emittedPairs++;
 
-                // Only emit triangles after we have at least 2 vertex pairs
-                if (emittedPairs >= 2) {
+                if (j >= 2) {
                   indexData[idxCursor + 0] = vtxCursor - 4;
                   indexData[idxCursor + 1] = vtxCursor - 3;
                   indexData[idxCursor + 2] = vtxCursor - 2;
@@ -577,50 +537,48 @@
               s.current = p;
             }
 
-            // Last vertex pair — only if we emitted at least one pair
-            if (s.normal && emittedPairs >= 1) {
-              s.offset = [s.normal[0], s.normal[1]];
-              floatData[vtxCursor * 7 + 0] = s.current[0] - this.centerAtLastUpdate[0];
-              floatData[vtxCursor * 7 + 1] = s.current[1] - this.centerAtLastUpdate[1];
-              floatData[vtxCursor * 7 + 2] = s.offset[0];
-              floatData[vtxCursor * 7 + 3] = s.offset[1];
-              floatData[vtxCursor * 7 + 4] = s.distance;
-              floatData[vtxCursor * 7 + 5] = +1;
-              colorData[4 * (vtxCursor * 7 + 6) + 0] = color[0];
-              colorData[4 * (vtxCursor * 7 + 6) + 1] = color[1];
-              colorData[4 * (vtxCursor * 7 + 6) + 2] = color[2];
-              colorData[4 * (vtxCursor * 7 + 6) + 3] = 255;
+            // Finishing up (last 2 extruded vertices and 6 indices).
+            s.offset = [s.normal[0], s.normal[1]];
+            floatData[vtxCursor * 7 + 0] = s.current[0] - this.centerAtLastUpdate[0];
+            floatData[vtxCursor * 7 + 1] = s.current[1] - this.centerAtLastUpdate[1];
+            floatData[vtxCursor * 7 + 2] = s.offset[0];
+            floatData[vtxCursor * 7 + 3] = s.offset[1];
+            floatData[vtxCursor * 7 + 4] = s.distance;
+            floatData[vtxCursor * 7 + 5] = +1;
+            colorData[4 * (vtxCursor * 7 + 6) + 0] = color[0];
+            colorData[4 * (vtxCursor * 7 + 6) + 1] = color[1];
+            colorData[4 * (vtxCursor * 7 + 6) + 2] = color[2];
+            colorData[4 * (vtxCursor * 7 + 6) + 3] = 255;
+            floatData[vtxCursor * 7 + 7] = s.current[0] - this.centerAtLastUpdate[0];
+            floatData[vtxCursor * 7 + 8] = s.current[1] - this.centerAtLastUpdate[1];
+            floatData[vtxCursor * 7 + 9] = -s.offset[0];
+            floatData[vtxCursor * 7 + 10] = -s.offset[1];
+            floatData[vtxCursor * 7 + 11] = s.distance;
+            floatData[vtxCursor * 7 + 12] = -1;
+            colorData[4 * (vtxCursor * 7 + 13) + 0] = color[0];
+            colorData[4 * (vtxCursor * 7 + 13) + 1] = color[1];
+            colorData[4 * (vtxCursor * 7 + 13) + 2] = color[2];
+            colorData[4 * (vtxCursor * 7 + 13) + 3] = 255;
+            vtxCursor += 2;
 
-              floatData[vtxCursor * 7 + 7] = s.current[0] - this.centerAtLastUpdate[0];
-              floatData[vtxCursor * 7 + 8] = s.current[1] - this.centerAtLastUpdate[1];
-              floatData[vtxCursor * 7 + 9] = -s.offset[0];
-              floatData[vtxCursor * 7 + 10] = -s.offset[1];
-              floatData[vtxCursor * 7 + 11] = s.distance;
-              floatData[vtxCursor * 7 + 12] = -1;
-              colorData[4 * (vtxCursor * 7 + 13) + 0] = color[0];
-              colorData[4 * (vtxCursor * 7 + 13) + 1] = color[1];
-              colorData[4 * (vtxCursor * 7 + 13) + 2] = color[2];
-              colorData[4 * (vtxCursor * 7 + 13) + 3] = 255;
-              vtxCursor += 2;
-
-              indexData[idxCursor + 0] = vtxCursor - 4;
-              indexData[idxCursor + 1] = vtxCursor - 3;
-              indexData[idxCursor + 2] = vtxCursor - 2;
-              indexData[idxCursor + 3] = vtxCursor - 3;
-              indexData[idxCursor + 4] = vtxCursor - 1;
-              indexData[idxCursor + 5] = vtxCursor - 2;
-              idxCursor += 6;
-            }
+            indexData[idxCursor + 0] = vtxCursor - 4;
+            indexData[idxCursor + 1] = vtxCursor - 3;
+            indexData[idxCursor + 2] = vtxCursor - 2;
+            indexData[idxCursor + 3] = vtxCursor - 3;
+            indexData[idxCursor + 4] = vtxCursor - 1;
+            indexData[idxCursor + 5] = vtxCursor - 2;
+            idxCursor += 6;
 
             s.current = null;
           }
 
-          // Upload only the used portion of the buffers
+          // Upload full buffers to GPU
           gl.bindBuffer(gl.ARRAY_BUFFER, this.vertexBuffer);
-          gl.bufferData(gl.ARRAY_BUFFER, floatData.buffer.slice(0, vtxCursor * 28), gl.STATIC_DRAW);
+          gl.bufferData(gl.ARRAY_BUFFER, vertexData, gl.STATIC_DRAW);
           gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, this.indexBuffer);
-          gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, indexData.buffer.slice(0, idxCursor * 2), gl.STATIC_DRAW);
-          this.indexBufferSize = idxCursor;
+          gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, indexData, gl.STATIC_DRAW);
+
+          this.indexBufferSize = indexData.length;
         },
       });
 
@@ -687,21 +645,32 @@
         // Load real road data and clean it
         const rawTrajectories = await loadCityData(cityKey);
 
-        // Split any path that has a gap > ~330m between consecutive points.
-        // These gaps come from bad name-based merges in the OSM processing
-        // and appear as straight lines flashing across the map.
-        const MAX_GAP_DEG = 0.003;
+        // Clean the data so the original sample renderer works perfectly:
+        // 1. Remove duplicate consecutive points (cause NaN → division by zero)
+        // 2. Split at gaps > ~330m (bad name-based merges in OSM processing)
+        const MAX_GAP = 0.003;
+        const MIN_SEG = 0.000001;
         const trajectories = [];
         for (const t of rawTrajectories) {
-          let sub = [t.path[0]];
+          // First: deduplicate consecutive points
+          const deduped = [t.path[0]];
           for (let k = 1; k < t.path.length; k++) {
-            const dx = t.path[k][0] - t.path[k - 1][0];
-            const dy = t.path[k][1] - t.path[k - 1][1];
-            if (Math.sqrt(dx * dx + dy * dy) > MAX_GAP_DEG) {
+            const dx = t.path[k][0] - deduped[deduped.length - 1][0];
+            const dy = t.path[k][1] - deduped[deduped.length - 1][1];
+            if (Math.abs(dx) > MIN_SEG || Math.abs(dy) > MIN_SEG) {
+              deduped.push(t.path[k]);
+            }
+          }
+          // Then: split at large gaps
+          let sub = [deduped[0]];
+          for (let k = 1; k < deduped.length; k++) {
+            const dx = deduped[k][0] - deduped[k - 1][0];
+            const dy = deduped[k][1] - deduped[k - 1][1];
+            if (Math.sqrt(dx * dx + dy * dy) > MAX_GAP) {
               if (sub.length >= 2) trajectories.push({ path: sub, color: t.color });
-              sub = [t.path[k]];
+              sub = [deduped[k]];
             } else {
-              sub.push(t.path[k]);
+              sub.push(deduped[k]);
             }
           }
           if (sub.length >= 2) trajectories.push({ path: sub, color: t.color });
