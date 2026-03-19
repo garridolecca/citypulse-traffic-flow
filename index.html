@@ -493,6 +493,8 @@
             const color = graphic.attributes["color"];
 
             let s = {};
+            // Track emitted vertex pairs per path for correct indexing
+            let emittedPairs = 0;
 
             for (let j = 0; j < path.length; ++j) {
               const p = path[j];
@@ -503,8 +505,8 @@
                   s.delta[0] * s.delta[0] + s.delta[1] * s.delta[1],
                 );
 
-                // Skip zero-length segments
-                if (deltaLength < 0.001) {
+                // Skip zero/near-zero-length segments (prevents NaN)
+                if (deltaLength < 0.01) {
                   s.current = p;
                   continue;
                 }
@@ -553,8 +555,10 @@
                 colorData[4 * (vtxCursor * 7 + 13) + 2] = color[2];
                 colorData[4 * (vtxCursor * 7 + 13) + 3] = 255;
                 vtxCursor += 2;
+                emittedPairs++;
 
-                if (j >= 2) {
+                // Only emit triangles after we have at least 2 vertex pairs
+                if (emittedPairs >= 2) {
                   indexData[idxCursor + 0] = vtxCursor - 4;
                   indexData[idxCursor + 1] = vtxCursor - 3;
                   indexData[idxCursor + 2] = vtxCursor - 2;
@@ -573,8 +577,8 @@
               s.current = p;
             }
 
-            // Last vertex pair
-            if (s.normal) {
+            // Last vertex pair — only if we emitted at least one pair
+            if (s.normal && emittedPairs >= 1) {
               s.offset = [s.normal[0], s.normal[1]];
               floatData[vtxCursor * 7 + 0] = s.current[0] - this.centerAtLastUpdate[0];
               floatData[vtxCursor * 7 + 1] = s.current[1] - this.centerAtLastUpdate[1];
