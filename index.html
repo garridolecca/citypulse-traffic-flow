@@ -33,7 +33,13 @@
         width: 270px;
         z-index: 100;
         box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+        max-height: calc(100vh - 30px);
+        overflow-y: auto;
       }
+
+      #infoPanel::-webkit-scrollbar { width: 4px; }
+      #infoPanel::-webkit-scrollbar-track { background: transparent; }
+      #infoPanel::-webkit-scrollbar-thumb { background: rgba(0, 238, 255, 0.2); border-radius: 2px; }
 
       #infoPanel h1 {
         margin: 0 0 2px 0;
@@ -78,6 +84,7 @@
         font-size: 11px;
         color: #999;
         margin-bottom: 4px;
+        align-items: center;
       }
 
       .control-value {
@@ -103,6 +110,11 @@
         background: #00eeff;
         cursor: pointer;
         box-shadow: 0 0 8px rgba(0, 238, 255, 0.5);
+      }
+
+      .control-group input[type="checkbox"] {
+        accent-color: #00eeff;
+        margin-right: 6px;
       }
 
       .badge {
@@ -164,6 +176,19 @@
         color: #00eeff;
       }
 
+      .compute-toggle-btn {
+        display: inline-block;
+        background: rgba(0, 238, 255, 0.08);
+        border: 1px solid rgba(0, 238, 255, 0.2);
+        border-radius: 4px;
+        padding: 2px 8px;
+        font-size: 10px;
+        color: #00eeff;
+        cursor: pointer;
+        transition: all 0.2s;
+      }
+      .compute-toggle-btn:hover { background: rgba(0, 238, 255, 0.2); }
+
       #loadingOverlay {
         position: absolute;
         top: 0; left: 0; right: 0; bottom: 0;
@@ -206,7 +231,53 @@
       ]);
 
       // ============================================================
-      // City Configurations
+      //  UTILITY: Lng/Lat to Web Mercator
+      // ============================================================
+      function lngLatToMercator(lng, lat) {
+        const x = lng * 20037508.34 / 180;
+        const y = Math.log(Math.tan((90 + lat) * Math.PI / 360)) / Math.PI * 20037508.34;
+        return [x, y];
+      }
+
+      // ============================================================
+      //  UTILITY: Compile Shader Helper
+      // ============================================================
+      function compileShader(gl, type, source) {
+        const shader = gl.createShader(type);
+        gl.shaderSource(shader, source);
+        gl.compileShader(shader);
+        if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+          console.error("Shader compile error:", gl.getShaderInfoLog(shader));
+          console.error("Source:", source);
+          gl.deleteShader(shader);
+          return null;
+        }
+        return shader;
+      }
+
+      function createProgram(gl, vsSrc, fsSrc, transformFeedbackVaryings) {
+        const vs = compileShader(gl, gl.VERTEX_SHADER, vsSrc);
+        const fs = compileShader(gl, gl.FRAGMENT_SHADER, fsSrc);
+        if (!vs || !fs) return null;
+        const prog = gl.createProgram();
+        gl.attachShader(prog, vs);
+        gl.attachShader(prog, fs);
+        if (transformFeedbackVaryings) {
+          gl.transformFeedbackVaryings(prog, transformFeedbackVaryings, gl.INTERLEAVED_ATTRIBS);
+        }
+        gl.linkProgram(prog);
+        gl.deleteShader(vs);
+        gl.deleteShader(fs);
+        if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
+          console.error("Program link error:", gl.getProgramInfoLog(prog));
+          gl.deleteProgram(prog);
+          return null;
+        }
+        return prog;
+      }
+
+      // ============================================================
+      //  City Configurations
       // ============================================================
       const CITIES = {
         porto: {
@@ -241,7 +312,296 @@
       }
 
       // ============================================================
-      // Custom Layer View — exact original ArcGIS sample renderer
+      //  BLOOM SHADER SOURCES (GLSL 300 es)
+      // ============================================================
+      const FULLSCREEN_QUAD_VS = `#version 300 es
+        precision highp float;
+        in vec2 a_position;
+        out vec2 v_uv;
+        void main() {
+          v_uv = a_position * 0.5 + 0.5;
+          gl_Position = vec4(a_position, 0.0, 1.0);
+        }
+      `;
+
+      const BLUR_FS = `#version 300 es
+        precision highp float;
+        uniform sampler2D u_texture;
+        uniform vec2 u_direction;
+        in vec2 v_uv;
+        out vec4 fragColor;
+        void main() {
+          float w[5] = float[](0.2270270, 0.1945946, 0.1216216, 0.0540540, 0.0162162);
+          vec3 result = texture(u_texture, v_uv).rgb * w[0];
+          for (int i = 1; i < 5; i++) {
+            vec2 off = u_direction * float(i);
+            result += texture(u_texture, v_uv + off).rgb * w[i];
+            result += texture(u_texture, v_uv - off).rgb * w[i];
+          }
+          fragColor = vec4(result, 1.0);
+        }
+      `;
+
+      const COMPOSITE_FS = `#version 300 es
+        precision highp float;
+        uniform sampler2D u_scene;
+        uniform sampler2D u_bloom;
+        uniform float u_bloomStrength;
+        in vec2 v_uv;
+        out vec4 fragColor;
+        void main() {
+          vec3 scene = texture(u_scene, v_uv).rgb;
+          vec3 bloom = texture(u_bloom, v_uv).rgb;
+          fragColor = vec4(scene + bloom * u_bloomStrength, 1.0);
+        }
+      `;
+
+      // ============================================================
+      //  PARTICLE SHADER SOURCES (GLSL 300 es)
+      // ============================================================
+      const PARTICLE_ADVECT_VS = `#version 300 es
+        precision highp float;
+        in vec4 a_particle; // x, y, progress, roadAndLife
+        uniform sampler2D u_roadIndex;  // RGBA32F: (startOffset, pointCount, totalLength, 0)
+        uniform sampler2D u_roadPoints; // RGBA32F: (x_merc, y_merc, dist_to_next, 0)
+        uniform int u_roadCount;
+        uniform int u_roadPointsWidth;
+        uniform int u_roadIndexWidth;
+        uniform float u_dt;
+        uniform float u_speed;
+        uniform float u_seed;
+        out vec4 v_particle;
+
+        // Simple pseudo-random
+        float rand(vec2 co) {
+          return fract(sin(dot(co, vec2(12.9898, 78.233))) * 43758.5453);
+        }
+
+        void main() {
+          float x = a_particle.x;
+          float y = a_particle.y;
+          float progress = a_particle.z;
+          float roadAndLife = a_particle.w;
+
+          int roadIdx = int(floor(roadAndLife));
+          float life = fract(roadAndLife) * 1000.0;
+
+          life -= u_dt;
+
+          // Check if particle needs respawn
+          if (life <= 0.0 || roadIdx < 0 || roadIdx >= u_roadCount) {
+            // Respawn on a random road
+            float r1 = rand(vec2(float(gl_VertexID) * 0.001 + u_seed, u_seed * 0.7));
+            float r2 = rand(vec2(u_seed * 0.3, float(gl_VertexID) * 0.002 + u_seed));
+            roadIdx = int(floor(r1 * float(u_roadCount)));
+            if (roadIdx >= u_roadCount) roadIdx = u_roadCount - 1;
+            progress = 0.0;
+            life = 5.0 + r2 * 15.0; // 5-20 seconds lifetime
+
+            // Get start position
+            int rix = roadIdx % u_roadIndexWidth;
+            int riy = roadIdx / u_roadIndexWidth;
+            vec4 roadInfo = texelFetch(u_roadIndex, ivec2(rix, riy), 0);
+            int startOff = int(roadInfo.x);
+            int pix = startOff % u_roadPointsWidth;
+            int piy = startOff / u_roadPointsWidth;
+            vec4 pt = texelFetch(u_roadPoints, ivec2(pix, piy), 0);
+            x = pt.x;
+            y = pt.y;
+          } else {
+            // Advance along road
+            int rix = roadIdx % u_roadIndexWidth;
+            int riy = roadIdx / u_roadIndexWidth;
+            vec4 roadInfo = texelFetch(u_roadIndex, ivec2(rix, riy), 0);
+            int startOff = int(roadInfo.x);
+            int pointCount = int(roadInfo.y);
+            float totalLength = roadInfo.z;
+
+            if (totalLength > 0.0 && pointCount > 1) {
+              progress += u_dt * u_speed * 50.0 / totalLength;
+              if (progress >= 1.0) progress = 0.0;
+
+              float targetDist = progress * totalLength;
+              float accum = 0.0;
+
+              // Walk segments to find position
+              int prevIdx = startOff;
+              for (int i = 0; i < pointCount - 1; i++) {
+                int curOff = startOff + i;
+                int cx = curOff % u_roadPointsWidth;
+                int cy = curOff / u_roadPointsWidth;
+                vec4 ptCur = texelFetch(u_roadPoints, ivec2(cx, cy), 0);
+                float segLen = ptCur.z;
+
+                if (accum + segLen >= targetDist && segLen > 0.0) {
+                  float t = (targetDist - accum) / segLen;
+                  int nextOff = curOff + 1;
+                  int nx = nextOff % u_roadPointsWidth;
+                  int ny = nextOff / u_roadPointsWidth;
+                  vec4 ptNext = texelFetch(u_roadPoints, ivec2(nx, ny), 0);
+                  x = mix(ptCur.x, ptNext.x, t);
+                  y = mix(ptCur.y, ptNext.y, t);
+                  break;
+                }
+                accum += segLen;
+              }
+            }
+          }
+
+          float encodedLife = float(roadIdx) + life / 1000.0;
+          v_particle = vec4(x, y, progress, encodedLife);
+        }
+      `;
+
+      const PARTICLE_ADVECT_FS = `#version 300 es
+        precision highp float;
+        void main() { discard; }
+      `;
+
+      const PARTICLE_DRAW_VS = `#version 300 es
+        precision highp float;
+        in vec4 a_particle;
+        uniform mat3 u_transform;
+        uniform mat3 u_display;
+        uniform vec2 u_centerOffset;
+        uniform float u_pointSize;
+        out float v_life;
+        void main() {
+          float life = fract(a_particle.w) * 1000.0;
+          v_life = life;
+          vec2 pos = a_particle.xy - u_centerOffset;
+          gl_Position.xy = (u_display * (u_transform * vec3(pos, 1.0))).xy;
+          gl_Position.zw = vec2(0.0, 1.0);
+          gl_PointSize = u_pointSize;
+        }
+      `;
+
+      const PARTICLE_DRAW_FS = `#version 300 es
+        precision highp float;
+        in float v_life;
+        out vec4 fragColor;
+        void main() {
+          vec2 cxy = 2.0 * gl_PointCoord - 1.0;
+          float r = dot(cxy, cxy);
+          if (r > 1.0) discard;
+          float alpha = exp(-r * 3.0) * clamp(v_life / 3.0, 0.0, 1.0);
+          vec3 color = vec3(0.3, 0.9, 1.0);
+          fragColor = vec4(color * alpha, alpha);
+        }
+      `;
+
+      // ============================================================
+      //  WGSL COMPUTE SHADER (WebGPU particle advection)
+      // ============================================================
+      const WGSL_ADVECT = `
+        struct Particle {
+          x: f32,
+          y: f32,
+          progress: f32,
+          road_and_life: f32,
+        }
+
+        struct RoadInfo {
+          start: f32,
+          count: f32,
+          total_len: f32,
+          pad: f32,
+        }
+
+        struct RoadPoint {
+          x: f32,
+          y: f32,
+          seg_len: f32,
+          pad: f32,
+        }
+
+        struct Params {
+          road_count: u32,
+          points_width: u32,
+          index_width: u32,
+          particle_count: u32,
+          dt: f32,
+          speed: f32,
+          seed: f32,
+          pad: f32,
+        }
+
+        @group(0) @binding(0) var<storage, read> particles_in: array<Particle>;
+        @group(0) @binding(1) var<storage, read_write> particles_out: array<Particle>;
+        @group(0) @binding(2) var<storage, read> road_index: array<RoadInfo>;
+        @group(0) @binding(3) var<storage, read> road_points: array<RoadPoint>;
+        @group(0) @binding(4) var<uniform> params: Params;
+
+        fn rand(co: vec2<f32>) -> f32 {
+          return fract(sin(dot(co, vec2<f32>(12.9898, 78.233))) * 43758.5453);
+        }
+
+        @compute @workgroup_size(256)
+        fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+          let idx = gid.x;
+          if (idx >= params.particle_count) { return; }
+
+          var p = particles_in[idx];
+          var x = p.x;
+          var y = p.y;
+          var progress = p.progress;
+          var road_and_life = p.road_and_life;
+
+          var road_idx = i32(floor(road_and_life));
+          var life = fract(road_and_life) * 1000.0;
+
+          life -= params.dt;
+
+          if (life <= 0.0 || road_idx < 0 || road_idx >= i32(params.road_count)) {
+            let r1 = rand(vec2<f32>(f32(idx) * 0.001 + params.seed, params.seed * 0.7));
+            let r2 = rand(vec2<f32>(params.seed * 0.3, f32(idx) * 0.002 + params.seed));
+            road_idx = i32(floor(r1 * f32(params.road_count)));
+            if (road_idx >= i32(params.road_count)) { road_idx = i32(params.road_count) - 1; }
+            progress = 0.0;
+            life = 5.0 + r2 * 15.0;
+
+            let ri = road_index[road_idx];
+            let start_off = i32(ri.start);
+            let pt = road_points[start_off];
+            x = pt.x;
+            y = pt.y;
+          } else {
+            let ri = road_index[road_idx];
+            let start_off = i32(ri.start);
+            let point_count = i32(ri.count);
+            let total_length = ri.total_len;
+
+            if (total_length > 0.0 && point_count > 1) {
+              progress += params.dt * params.speed * 50.0 / total_length;
+              if (progress >= 1.0) { progress = 0.0; }
+
+              let target_dist = progress * total_length;
+              var accum: f32 = 0.0;
+
+              for (var i: i32 = 0; i < point_count - 1; i++) {
+                let cur_off = start_off + i;
+                let pt_cur = road_points[cur_off];
+                let seg_len = pt_cur.seg_len;
+
+                if (accum + seg_len >= target_dist && seg_len > 0.0) {
+                  let t = (target_dist - accum) / seg_len;
+                  let pt_next = road_points[cur_off + 1];
+                  x = mix(pt_cur.x, pt_next.x, t);
+                  y = mix(pt_cur.y, pt_next.y, t);
+                  break;
+                }
+                accum += seg_len;
+              }
+            }
+          }
+
+          let encoded_life = f32(road_idx) + life / 1000.0;
+          particles_out[idx] = Particle(x, y, progress, encoded_life);
+        }
+      `;
+
+      // ============================================================
+      //  CustomLayerView2D — Trail Renderer with Bloom Post-Processing
       // ============================================================
       const CustomLayerView2D = BaseLayerViewGL2D.createSubclass({
         aPosition: 0,
@@ -258,8 +618,16 @@
           this.display = mat3.fromValues(NaN, 0, 0, 0, NaN, 0, -1, 1, 1);
           this.screenScaling = vec3.fromValues(NaN, NaN, 1);
           this.needsUpdate = false;
+          // Bloom state
+          this.bloomEnabled = true;
+          this.bloomStrength = 0.6;
+          this._lastWidth = 0;
+          this._lastHeight = 0;
         },
 
+        // -----------------------------------------------------------
+        //  attach() — create trail program, bloom FBOs, bloom shaders
+        // -----------------------------------------------------------
         attach: function () {
           const gl = this.context;
 
@@ -270,6 +638,7 @@
 
           this.watcher = reactiveUtils.on(() => this.layer.graphics, "change", requestUpdate);
 
+          // ---- Trail shader (GLSL 1.0, unchanged) ----
           const vertexSource = `
             precision highp float;
             uniform mat3 u_transform;
@@ -339,16 +708,10 @@
           this.indexBuffer = gl.createBuffer();
           this.indexBufferSize = 0;
 
-          if (gl.getParameter(gl.VERSION).startsWith("WebGL 2.0")) {
-            this.vao = gl.createVertexArray();
-            this.bindVertexArray = (vao) => gl.bindVertexArray(vao);
-            this.deleteVertexArray = (vao) => gl.deleteVertexArray(vao);
-          } else {
-            const vaoExt = gl.getExtension("OES_vertex_array_object");
-            this.vao = vaoExt.createVertexArrayOES();
-            this.bindVertexArray = (vao) => vaoExt.bindVertexArrayOES(vao);
-            this.deleteVertexArray = (vao) => vaoExt.deleteVertexArrayOES(vao);
-          }
+          // VAO for trail
+          this.vao = gl.createVertexArray();
+          this.bindVertexArray = (vao) => gl.bindVertexArray(vao);
+          this.deleteVertexArray = (vao) => gl.deleteVertexArray(vao);
 
           this.bindVertexArray(this.vao);
           gl.bindBuffer(gl.ARRAY_BUFFER, this.vertexBuffer);
@@ -369,8 +732,101 @@
             this.view.state.center[0],
             this.view.state.center[1],
           );
+
+          // ---- Bloom post-processing resources ----
+          this._initBloom(gl);
         },
 
+        // -----------------------------------------------------------
+        //  Bloom FBO initialization
+        // -----------------------------------------------------------
+        _initBloom: function (gl) {
+          // Fullscreen quad VAO
+          const quadVerts = new Float32Array([-1,-1, 1,-1, -1,1, 1,1]);
+          this.quadVBO = gl.createBuffer();
+          gl.bindBuffer(gl.ARRAY_BUFFER, this.quadVBO);
+          gl.bufferData(gl.ARRAY_BUFFER, quadVerts, gl.STATIC_DRAW);
+
+          this.quadVAO = gl.createVertexArray();
+          gl.bindVertexArray(this.quadVAO);
+          gl.bindBuffer(gl.ARRAY_BUFFER, this.quadVBO);
+          gl.enableVertexAttribArray(0);
+          gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+          gl.bindVertexArray(null);
+
+          // Blur program
+          this.blurProgram = createProgram(gl, FULLSCREEN_QUAD_VS, BLUR_FS);
+          this.blurUTexture = gl.getUniformLocation(this.blurProgram, "u_texture");
+          this.blurUDirection = gl.getUniformLocation(this.blurProgram, "u_direction");
+
+          // Composite program
+          this.compositeProgram = createProgram(gl, FULLSCREEN_QUAD_VS, COMPOSITE_FS);
+          this.compUScene = gl.getUniformLocation(this.compositeProgram, "u_scene");
+          this.compUBloom = gl.getUniformLocation(this.compositeProgram, "u_bloom");
+          this.compUStrength = gl.getUniformLocation(this.compositeProgram, "u_bloomStrength");
+
+          // FBOs will be created/resized in _ensureBloomFBOs
+          this.sceneFBO = null;
+          this.sceneTex = null;
+          this.blurFBO_A = null;
+          this.blurTex_A = null;
+          this.blurFBO_B = null;
+          this.blurTex_B = null;
+        },
+
+        _createFBO: function (gl, width, height) {
+          const tex = gl.createTexture();
+          gl.bindTexture(gl.TEXTURE_2D, tex);
+          gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+
+          const fbo = gl.createFramebuffer();
+          gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+          gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+
+          return { fbo, tex, width, height };
+        },
+
+        _deleteFBOSet: function (gl) {
+          if (this.sceneFBO) { gl.deleteFramebuffer(this.sceneFBO.fbo); gl.deleteTexture(this.sceneFBO.tex); }
+          if (this.blurFBO_A) { gl.deleteFramebuffer(this.blurFBO_A.fbo); gl.deleteTexture(this.blurFBO_A.tex); }
+          if (this.blurFBO_B) { gl.deleteFramebuffer(this.blurFBO_B.fbo); gl.deleteTexture(this.blurFBO_B.tex); }
+          this.sceneFBO = null;
+          this.blurFBO_A = null;
+          this.blurFBO_B = null;
+        },
+
+        _ensureBloomFBOs: function (gl, width, height) {
+          if (this.sceneFBO && this._lastWidth === width && this._lastHeight === height) return;
+          this._deleteFBOSet(gl);
+          this._lastWidth = width;
+          this._lastHeight = height;
+
+          // Save current FBO binding
+          const savedFBO = gl.getParameter(gl.FRAMEBUFFER_BINDING);
+
+          this.sceneFBO = this._createFBO(gl, width, height);
+          const qw = Math.max(1, Math.floor(width / 4));
+          const qh = Math.max(1, Math.floor(height / 4));
+          this.blurFBO_A = this._createFBO(gl, qw, qh);
+          this.blurFBO_B = this._createFBO(gl, qw, qh);
+
+          // Restore previous FBO
+          gl.bindFramebuffer(gl.FRAMEBUFFER, savedFBO);
+        },
+
+        _drawFullscreenQuad: function (gl) {
+          gl.bindVertexArray(this.quadVAO);
+          gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+          gl.bindVertexArray(null);
+        },
+
+        // -----------------------------------------------------------
+        //  detach()
+        // -----------------------------------------------------------
         detach: function () {
           this.watcher.remove();
           const gl = this.context;
@@ -378,8 +834,17 @@
           gl.deleteBuffer(this.indexBuffer);
           this.deleteVertexArray(this.vao);
           gl.deleteProgram(this.program);
+          // Bloom cleanup
+          this._deleteFBOSet(gl);
+          if (this.quadVBO) gl.deleteBuffer(this.quadVBO);
+          if (this.quadVAO) gl.deleteVertexArray(this.quadVAO);
+          if (this.blurProgram) gl.deleteProgram(this.blurProgram);
+          if (this.compositeProgram) gl.deleteProgram(this.compositeProgram);
         },
 
+        // -----------------------------------------------------------
+        //  render() — trails with optional bloom post-processing
+        // -----------------------------------------------------------
         render: function (renderParameters) {
           const gl = renderParameters.context;
           const state = renderParameters.state;
@@ -388,6 +853,7 @@
 
           if (this.indexBufferSize === 0) return;
 
+          // Compute transform matrices
           mat3.identity(this.transform);
           this.screenTranslation[0] = (state.pixelRatio * state.size[0]) / 2;
           this.screenTranslation[1] = (state.pixelRatio * state.size[1]) / 2;
@@ -406,23 +872,92 @@
           this.display[0] = 2 / (state.pixelRatio * state.size[0]);
           this.display[4] = -2 / (state.pixelRatio * state.size[1]);
 
-          gl.useProgram(this.program);
-          gl.uniformMatrix3fv(this.uTransform, false, this.transform);
-          gl.uniformMatrix3fv(this.uExtrude, false, this.extrude);
-          gl.uniformMatrix3fv(this.uDisplay, false, this.display);
-          gl.uniform1f(this.uCurrentTime, performance.now() / 1000.0);
-          gl.uniform1f(this.uTrailSpeed, this.layer.trailSpeed || 50);
-          gl.uniform1f(this.uTrailLength, this.layer.trailLength || 300);
-          gl.uniform1f(this.uTrailCycle, this.layer.trailCycle || 1000);
-          this.bindVertexArray(this.vao);
-          gl.enable(gl.BLEND);
-          gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
-          gl.drawElements(gl.TRIANGLES, this.indexBufferSize, gl.UNSIGNED_SHORT, 0);
+          // Save ArcGIS FBO
+          const arcgisFBO = gl.getParameter(gl.FRAMEBUFFER_BINDING);
+
+          const drawTrails = () => {
+            gl.useProgram(this.program);
+            gl.uniformMatrix3fv(this.uTransform, false, this.transform);
+            gl.uniformMatrix3fv(this.uExtrude, false, this.extrude);
+            gl.uniformMatrix3fv(this.uDisplay, false, this.display);
+            gl.uniform1f(this.uCurrentTime, performance.now() / 1000.0);
+            gl.uniform1f(this.uTrailSpeed, this.layer.trailSpeed || 50);
+            gl.uniform1f(this.uTrailLength, this.layer.trailLength || 300);
+            gl.uniform1f(this.uTrailCycle, this.layer.trailCycle || 1000);
+            this.bindVertexArray(this.vao);
+            gl.enable(gl.BLEND);
+            gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+            gl.drawElements(gl.TRIANGLES, this.indexBufferSize, gl.UNSIGNED_SHORT, 0);
+            this.bindVertexArray(null);
+          };
+
+          if (this.bloomEnabled && this.bloomStrength > 0) {
+            const w = Math.round(state.pixelRatio * state.size[0]);
+            const h = Math.round(state.pixelRatio * state.size[1]);
+            this._ensureBloomFBOs(gl, w, h);
+
+            // 1. Draw trails into scene FBO
+            gl.bindFramebuffer(gl.FRAMEBUFFER, this.sceneFBO.fbo);
+            gl.viewport(0, 0, w, h);
+            gl.clearColor(0, 0, 0, 0);
+            gl.clear(gl.COLOR_BUFFER_BIT);
+            drawTrails();
+
+            // 2. Horizontal blur: scene -> blur A (quarter res)
+            gl.bindFramebuffer(gl.FRAMEBUFFER, this.blurFBO_A.fbo);
+            gl.viewport(0, 0, this.blurFBO_A.width, this.blurFBO_A.height);
+            gl.clearColor(0, 0, 0, 0);
+            gl.clear(gl.COLOR_BUFFER_BIT);
+            gl.useProgram(this.blurProgram);
+            gl.activeTexture(gl.TEXTURE0);
+            gl.bindTexture(gl.TEXTURE_2D, this.sceneFBO.tex);
+            gl.uniform1i(this.blurUTexture, 0);
+            gl.uniform2f(this.blurUDirection, 1.0 / this.blurFBO_A.width, 0.0);
+            gl.disable(gl.BLEND);
+            this._drawFullscreenQuad(gl);
+
+            // 3. Vertical blur: blur A -> blur B
+            gl.bindFramebuffer(gl.FRAMEBUFFER, this.blurFBO_B.fbo);
+            gl.viewport(0, 0, this.blurFBO_B.width, this.blurFBO_B.height);
+            gl.clearColor(0, 0, 0, 0);
+            gl.clear(gl.COLOR_BUFFER_BIT);
+            gl.activeTexture(gl.TEXTURE0);
+            gl.bindTexture(gl.TEXTURE_2D, this.blurFBO_A.tex);
+            gl.uniform1i(this.blurUTexture, 0);
+            gl.uniform2f(this.blurUDirection, 0.0, 1.0 / this.blurFBO_B.height);
+            this._drawFullscreenQuad(gl);
+
+            // 4. Composite: scene + bloom -> ArcGIS FBO
+            gl.bindFramebuffer(gl.FRAMEBUFFER, arcgisFBO);
+            gl.viewport(0, 0, w, h);
+            gl.useProgram(this.compositeProgram);
+            gl.activeTexture(gl.TEXTURE0);
+            gl.bindTexture(gl.TEXTURE_2D, this.sceneFBO.tex);
+            gl.uniform1i(this.compUScene, 0);
+            gl.activeTexture(gl.TEXTURE1);
+            gl.bindTexture(gl.TEXTURE_2D, this.blurFBO_B.tex);
+            gl.uniform1i(this.compUBloom, 1);
+            gl.uniform1f(this.compUStrength, this.bloomStrength);
+            gl.enable(gl.BLEND);
+            gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+            this._drawFullscreenQuad(gl);
+
+            // Cleanup texture bindings
+            gl.activeTexture(gl.TEXTURE1);
+            gl.bindTexture(gl.TEXTURE_2D, null);
+            gl.activeTexture(gl.TEXTURE0);
+            gl.bindTexture(gl.TEXTURE_2D, null);
+          } else {
+            // No bloom: draw directly to ArcGIS FBO
+            drawTrails();
+          }
 
           this.requestRender();
         },
 
-        // Exact original ArcGIS sample triangulation — no modifications
+        // -----------------------------------------------------------
+        //  updatePositions — Exact original ArcGIS sample triangulation
+        // -----------------------------------------------------------
         updatePositions: function (renderParameters) {
           const gl = renderParameters.context;
           const stationary = renderParameters.stationary;
@@ -589,7 +1124,7 @@
       });
 
       // ============================================================
-      // Custom Layer
+      //  CustomLayer (Trail Layer)
       // ============================================================
       const CustomLayer = GraphicsLayer.createSubclass({
         properties: {
@@ -609,10 +1144,607 @@
       });
 
       // ============================================================
-      // App State
+      //  ParticleLayerView2D — Transform Feedback Particles
+      // ============================================================
+      const ParticleLayerView2D = BaseLayerViewGL2D.createSubclass({
+        constructor: function () {
+          this.transform = mat3.create();
+          this.translationToCenter = vec2.create();
+          this.screenTranslation = vec2.create();
+          this.display = mat3.fromValues(NaN, 0, 0, 0, NaN, 0, -1, 1, 1);
+          this.screenScaling = vec3.fromValues(NaN, NaN, 1);
+          this.particleCount = 50000;
+          this.particleSpeed = 1.0;
+          this.pingPong = 0;
+          this._lastTime = performance.now() / 1000.0;
+          this._roadTexReady = false;
+          // WebGPU state
+          this._useWebGPU = false;
+          this._gpuDevice = null;
+          this._gpuReady = false;
+          this._gpuPipeline = null;
+          this._gpuParamsBuffer = null;
+          this._gpuBindGroups = [null, null];
+          this._gpuInputBuffers = [null, null];
+          this._gpuStagingBuffer = null;
+          this._gpuPendingRead = false;
+          this._gpuReadbackData = null;
+          this._gpuFrame = 0;
+        },
+
+        attach: function () {
+          const gl = this.context;
+
+          // ---- Advection program with transform feedback ----
+          this.advectProgram = createProgram(
+            gl, PARTICLE_ADVECT_VS, PARTICLE_ADVECT_FS, ['v_particle']
+          );
+          if (!this.advectProgram) {
+            console.error("[CityPulse] Failed to create advect program");
+            return;
+          }
+          this.advUParticle = 0; // a_particle location
+          this.advURoadIndex = gl.getUniformLocation(this.advectProgram, "u_roadIndex");
+          this.advURoadPoints = gl.getUniformLocation(this.advectProgram, "u_roadPoints");
+          this.advURoadCount = gl.getUniformLocation(this.advectProgram, "u_roadCount");
+          this.advURoadPointsWidth = gl.getUniformLocation(this.advectProgram, "u_roadPointsWidth");
+          this.advURoadIndexWidth = gl.getUniformLocation(this.advectProgram, "u_roadIndexWidth");
+          this.advUDt = gl.getUniformLocation(this.advectProgram, "u_dt");
+          this.advUSpeed = gl.getUniformLocation(this.advectProgram, "u_speed");
+          this.advUSeed = gl.getUniformLocation(this.advectProgram, "u_seed");
+
+          // ---- Draw program ----
+          this.drawProgram = createProgram(gl, PARTICLE_DRAW_VS, PARTICLE_DRAW_FS);
+          if (!this.drawProgram) {
+            console.error("[CityPulse] Failed to create draw program");
+            return;
+          }
+          this.drawUTransform = gl.getUniformLocation(this.drawProgram, "u_transform");
+          this.drawUDisplay = gl.getUniformLocation(this.drawProgram, "u_display");
+          this.drawUCenterOffset = gl.getUniformLocation(this.drawProgram, "u_centerOffset");
+          this.drawUPointSize = gl.getUniformLocation(this.drawProgram, "u_pointSize");
+
+          // ---- Ping-pong buffers ----
+          this.particleBuffers = [gl.createBuffer(), gl.createBuffer()];
+          this.particleVAOs = [gl.createVertexArray(), gl.createVertexArray()];
+          this.transformFeedbacks = [gl.createTransformFeedback(), gl.createTransformFeedback()];
+
+          // Setup VAOs for each buffer
+          for (let i = 0; i < 2; i++) {
+            gl.bindVertexArray(this.particleVAOs[i]);
+            gl.bindBuffer(gl.ARRAY_BUFFER, this.particleBuffers[i]);
+            gl.enableVertexAttribArray(0);
+            gl.vertexAttribPointer(0, 4, gl.FLOAT, false, 0, 0);
+            gl.bindVertexArray(null);
+
+            // Setup transform feedback to write to the OTHER buffer
+            gl.bindTransformFeedback(gl.TRANSFORM_FEEDBACK, this.transformFeedbacks[i]);
+            gl.bindBufferBase(gl.TRANSFORM_FEEDBACK_BUFFER, 0, this.particleBuffers[1 - i]);
+            gl.bindTransformFeedback(gl.TRANSFORM_FEEDBACK, null);
+          }
+
+          // Road textures (will be populated when roads are loaded)
+          this.roadIndexTex = gl.createTexture();
+          this.roadPointsTex = gl.createTexture();
+          this.roadCount = 0;
+          this.roadPointsWidth = 1;
+          this.roadIndexWidth = 1;
+
+          this.centerAtLastUpdate = vec2.fromValues(
+            this.view.state.center[0],
+            this.view.state.center[1],
+          );
+
+          this._initParticles(gl);
+        },
+
+        _initParticles: function (gl) {
+          const count = this.particleCount;
+          const data = new Float32Array(count * 4);
+          for (let i = 0; i < count; i++) {
+            data[i * 4 + 0] = 0;
+            data[i * 4 + 1] = 0;
+            data[i * 4 + 2] = 0;
+            data[i * 4 + 3] = -1; // negative roadIdx triggers respawn
+          }
+          for (let i = 0; i < 2; i++) {
+            gl.bindBuffer(gl.ARRAY_BUFFER, this.particleBuffers[i]);
+            gl.bufferData(gl.ARRAY_BUFFER, data, gl.DYNAMIC_DRAW);
+          }
+          this.pingPong = 0;
+        },
+
+        reinitParticles: function (newCount) {
+          const gl = this.context;
+          if (!gl) return;
+          this.particleCount = newCount;
+
+          // Rebind transform feedback targets with new size
+          const data = new Float32Array(newCount * 4);
+          for (let i = 0; i < newCount; i++) {
+            data[i * 4 + 3] = -1;
+          }
+          for (let i = 0; i < 2; i++) {
+            gl.bindBuffer(gl.ARRAY_BUFFER, this.particleBuffers[i]);
+            gl.bufferData(gl.ARRAY_BUFFER, data, gl.DYNAMIC_DRAW);
+          }
+
+          // Rebind TF buffer bases
+          for (let i = 0; i < 2; i++) {
+            gl.bindTransformFeedback(gl.TRANSFORM_FEEDBACK, this.transformFeedbacks[i]);
+            gl.bindBufferBase(gl.TRANSFORM_FEEDBACK_BUFFER, 0, this.particleBuffers[1 - i]);
+            gl.bindTransformFeedback(gl.TRANSFORM_FEEDBACK, null);
+          }
+
+          this.pingPong = 0;
+
+          // Rebuild WebGPU buffers if active
+          if (this._useWebGPU && this._gpuDevice) {
+            this._rebuildGPUBuffers();
+          }
+        },
+
+        buildRoadTextures: function (trajectories) {
+          const gl = this.context;
+          if (!gl) return;
+
+          // Convert roads to mercator and pack into textures
+          const roadInfos = [];
+          const allPoints = [];
+          let offset = 0;
+
+          for (let i = 0; i < trajectories.length; i++) {
+            const path = trajectories[i].path;
+            const startOffset = offset;
+            const pointCount = path.length;
+            let totalLength = 0;
+
+            const mercPoints = [];
+            for (let j = 0; j < path.length; j++) {
+              const [mx, my] = lngLatToMercator(path[j][0], path[j][1]);
+              mercPoints.push([mx, my]);
+            }
+
+            // Calculate segment lengths
+            for (let j = 0; j < mercPoints.length; j++) {
+              let segLen = 0;
+              if (j < mercPoints.length - 1) {
+                const dx = mercPoints[j + 1][0] - mercPoints[j][0];
+                const dy = mercPoints[j + 1][1] - mercPoints[j][1];
+                segLen = Math.sqrt(dx * dx + dy * dy);
+                totalLength += segLen;
+              }
+              allPoints.push([mercPoints[j][0], mercPoints[j][1], segLen, 0]);
+            }
+
+            roadInfos.push([startOffset, pointCount, totalLength, 0]);
+            offset += pointCount;
+          }
+
+          // Pack into RGBA32F textures
+          // Road index texture
+          this.roadCount = roadInfos.length;
+          this.roadIndexWidth = Math.ceil(Math.sqrt(this.roadCount));
+          const roadIndexHeight = Math.ceil(this.roadCount / this.roadIndexWidth);
+          const roadIndexData = new Float32Array(this.roadIndexWidth * roadIndexHeight * 4);
+          for (let i = 0; i < roadInfos.length; i++) {
+            roadIndexData[i * 4 + 0] = roadInfos[i][0];
+            roadIndexData[i * 4 + 1] = roadInfos[i][1];
+            roadIndexData[i * 4 + 2] = roadInfos[i][2];
+            roadIndexData[i * 4 + 3] = roadInfos[i][3];
+          }
+
+          gl.bindTexture(gl.TEXTURE_2D, this.roadIndexTex);
+          gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, this.roadIndexWidth, roadIndexHeight, 0, gl.RGBA, gl.FLOAT, roadIndexData);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+
+          // Road points texture
+          const totalPoints = allPoints.length;
+          this.roadPointsWidth = Math.ceil(Math.sqrt(totalPoints));
+          const roadPointsHeight = Math.ceil(totalPoints / this.roadPointsWidth);
+          const roadPointsData = new Float32Array(this.roadPointsWidth * roadPointsHeight * 4);
+          for (let i = 0; i < allPoints.length; i++) {
+            roadPointsData[i * 4 + 0] = allPoints[i][0];
+            roadPointsData[i * 4 + 1] = allPoints[i][1];
+            roadPointsData[i * 4 + 2] = allPoints[i][2];
+            roadPointsData[i * 4 + 3] = allPoints[i][3];
+          }
+
+          gl.bindTexture(gl.TEXTURE_2D, this.roadPointsTex);
+          gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, this.roadPointsWidth, roadPointsHeight, 0, gl.RGBA, gl.FLOAT, roadPointsData);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+
+          gl.bindTexture(gl.TEXTURE_2D, null);
+
+          this._roadTexReady = true;
+          this._roadInfosRaw = roadInfos;
+          this._allPointsRaw = allPoints;
+
+          console.log(`[CityPulse Particles] ${this.roadCount} roads, ${totalPoints} points packed into textures`);
+
+          // Reinitialize particles so they respawn on new roads
+          this._initParticles(gl);
+
+          // Rebuild WebGPU buffers if active
+          if (this._useWebGPU && this._gpuDevice) {
+            this._buildGPUResources();
+          }
+        },
+
+        // -----------------------------------------------------------
+        //  WebGPU Compute Setup
+        // -----------------------------------------------------------
+        async initWebGPU() {
+          if (!navigator.gpu) return false;
+          try {
+            const adapter = await navigator.gpu.requestAdapter();
+            if (!adapter) return false;
+            this._gpuDevice = await adapter.requestDevice({
+              requiredFeatures: [],
+              requiredLimits: {
+                maxStorageBufferBindingSize: 256 * 1024 * 1024,
+              },
+            });
+            console.log("[CityPulse] WebGPU device acquired");
+
+            // Create compute pipeline
+            const shaderModule = this._gpuDevice.createShaderModule({ code: WGSL_ADVECT });
+            this._gpuPipeline = this._gpuDevice.createComputePipeline({
+              layout: 'auto',
+              compute: { module: shaderModule, entryPoint: 'main' },
+            });
+
+            if (this._roadTexReady) {
+              this._buildGPUResources();
+            }
+            return true;
+          } catch (e) {
+            console.error("[CityPulse] WebGPU init failed:", e);
+            return false;
+          }
+        },
+
+        _buildGPUResources: function () {
+          const device = this._gpuDevice;
+          if (!device || !this._roadInfosRaw) return;
+
+          // Road index buffer
+          const roadIndexData = new Float32Array(this._roadInfosRaw.length * 4);
+          for (let i = 0; i < this._roadInfosRaw.length; i++) {
+            roadIndexData[i * 4 + 0] = this._roadInfosRaw[i][0];
+            roadIndexData[i * 4 + 1] = this._roadInfosRaw[i][1];
+            roadIndexData[i * 4 + 2] = this._roadInfosRaw[i][2];
+            roadIndexData[i * 4 + 3] = this._roadInfosRaw[i][3];
+          }
+          this._gpuRoadIndexBuffer = device.createBuffer({
+            size: roadIndexData.byteLength,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+          });
+          device.queue.writeBuffer(this._gpuRoadIndexBuffer, 0, roadIndexData);
+
+          // Road points buffer
+          const roadPointsData = new Float32Array(this._allPointsRaw.length * 4);
+          for (let i = 0; i < this._allPointsRaw.length; i++) {
+            roadPointsData[i * 4 + 0] = this._allPointsRaw[i][0];
+            roadPointsData[i * 4 + 1] = this._allPointsRaw[i][1];
+            roadPointsData[i * 4 + 2] = this._allPointsRaw[i][2];
+            roadPointsData[i * 4 + 3] = this._allPointsRaw[i][3];
+          }
+          this._gpuRoadPointsBuffer = device.createBuffer({
+            size: roadPointsData.byteLength,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+          });
+          device.queue.writeBuffer(this._gpuRoadPointsBuffer, 0, roadPointsData);
+
+          // Params uniform buffer (8 floats = 32 bytes)
+          this._gpuParamsBuffer = device.createBuffer({
+            size: 32,
+            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+          });
+
+          this._rebuildGPUBuffers();
+          this._gpuReady = true;
+        },
+
+        _rebuildGPUBuffers: function () {
+          const device = this._gpuDevice;
+          if (!device) return;
+
+          const byteSize = this.particleCount * 4 * 4; // 4 floats * 4 bytes
+
+          // Double-buffered particle storage
+          this._gpuInputBuffers = [
+            device.createBuffer({ size: byteSize, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC }),
+            device.createBuffer({ size: byteSize, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC }),
+          ];
+
+          // Staging buffer for readback
+          this._gpuStagingBuffer = device.createBuffer({
+            size: byteSize,
+            usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+          });
+
+          // Initialize with respawn state
+          const initData = new Float32Array(this.particleCount * 4);
+          for (let i = 0; i < this.particleCount; i++) {
+            initData[i * 4 + 3] = -1;
+          }
+          device.queue.writeBuffer(this._gpuInputBuffers[0], 0, initData);
+          device.queue.writeBuffer(this._gpuInputBuffers[1], 0, initData);
+
+          // Rebuild bind groups
+          if (this._gpuRoadIndexBuffer && this._gpuRoadPointsBuffer && this._gpuParamsBuffer) {
+            this._gpuBindGroups = [
+              device.createBindGroup({
+                layout: this._gpuPipeline.getBindGroupLayout(0),
+                entries: [
+                  { binding: 0, resource: { buffer: this._gpuInputBuffers[0] } },
+                  { binding: 1, resource: { buffer: this._gpuInputBuffers[1] } },
+                  { binding: 2, resource: { buffer: this._gpuRoadIndexBuffer } },
+                  { binding: 3, resource: { buffer: this._gpuRoadPointsBuffer } },
+                  { binding: 4, resource: { buffer: this._gpuParamsBuffer } },
+                ],
+              }),
+              device.createBindGroup({
+                layout: this._gpuPipeline.getBindGroupLayout(0),
+                entries: [
+                  { binding: 0, resource: { buffer: this._gpuInputBuffers[1] } },
+                  { binding: 1, resource: { buffer: this._gpuInputBuffers[0] } },
+                  { binding: 2, resource: { buffer: this._gpuRoadIndexBuffer } },
+                  { binding: 3, resource: { buffer: this._gpuRoadPointsBuffer } },
+                  { binding: 4, resource: { buffer: this._gpuParamsBuffer } },
+                ],
+              }),
+            ];
+          }
+
+          this._gpuFrame = 0;
+          this._gpuPendingRead = false;
+          this._gpuReadbackData = null;
+        },
+
+        _dispatchGPUCompute: function (dt) {
+          const device = this._gpuDevice;
+          if (!device || !this._gpuReady || !this._gpuBindGroups[0]) return;
+
+          // Update params
+          const paramsData = new Float32Array([
+            this.roadCount,
+            this.roadPointsWidth,
+            this.roadIndexWidth,
+            this.particleCount,
+            dt,
+            this.particleSpeed,
+            performance.now() * 0.001 + Math.random(),
+            0,
+          ]);
+          // Reinterpret first 4 as uint32
+          const paramsU32 = new Uint32Array(paramsData.buffer);
+          paramsU32[0] = this.roadCount;
+          paramsU32[1] = this.roadPointsWidth;
+          paramsU32[2] = this.roadIndexWidth;
+          paramsU32[3] = this.particleCount;
+
+          device.queue.writeBuffer(this._gpuParamsBuffer, 0, paramsData);
+
+          const idx = this._gpuFrame % 2;
+          const commandEncoder = device.createCommandEncoder();
+          const passEncoder = commandEncoder.beginComputePass();
+          passEncoder.setPipeline(this._gpuPipeline);
+          passEncoder.setBindGroup(0, this._gpuBindGroups[idx]);
+          passEncoder.dispatchWorkgroups(Math.ceil(this.particleCount / 256));
+          passEncoder.end();
+
+          // Copy output to staging for readback
+          const outputBuf = this._gpuInputBuffers[1 - idx];
+          commandEncoder.copyBufferToBuffer(outputBuf, 0, this._gpuStagingBuffer, 0, this.particleCount * 16);
+
+          device.queue.submit([commandEncoder.finish()]);
+          this._gpuFrame++;
+
+          // Start async readback
+          if (!this._gpuPendingRead) {
+            this._gpuPendingRead = true;
+            this._gpuStagingBuffer.mapAsync(GPUMapMode.READ).then(() => {
+              const data = new Float32Array(this._gpuStagingBuffer.getMappedRange().slice(0));
+              this._gpuStagingBuffer.unmap();
+              this._gpuReadbackData = data;
+              this._gpuPendingRead = false;
+            }).catch(() => {
+              this._gpuPendingRead = false;
+            });
+          }
+        },
+
+        detach: function () {
+          const gl = this.context;
+          if (this.particleBuffers) {
+            this.particleBuffers.forEach(b => gl.deleteBuffer(b));
+          }
+          if (this.particleVAOs) {
+            this.particleVAOs.forEach(v => gl.deleteVertexArray(v));
+          }
+          if (this.transformFeedbacks) {
+            this.transformFeedbacks.forEach(tf => gl.deleteTransformFeedback(tf));
+          }
+          if (this.advectProgram) gl.deleteProgram(this.advectProgram);
+          if (this.drawProgram) gl.deleteProgram(this.drawProgram);
+          if (this.roadIndexTex) gl.deleteTexture(this.roadIndexTex);
+          if (this.roadPointsTex) gl.deleteTexture(this.roadPointsTex);
+        },
+
+        render: function (renderParameters) {
+          const gl = renderParameters.context;
+          const state = renderParameters.state;
+
+          if (!this._roadTexReady || this.roadCount === 0) {
+            this.requestRender();
+            return;
+          }
+
+          // Save ArcGIS FBO
+          const arcgisFBO = gl.getParameter(gl.FRAMEBUFFER_BINDING);
+
+          // Handle panning
+          if (!renderParameters.stationary) {
+            vec2.sub(this.translationToCenter, this.centerAtLastUpdate, state.center);
+          } else {
+            if (this.translationToCenter[0] !== 0 || this.translationToCenter[1] !== 0) {
+              this.centerAtLastUpdate.set(state.center);
+              this.translationToCenter[0] = 0;
+              this.translationToCenter[1] = 0;
+            }
+          }
+
+          // Time delta
+          const now = performance.now() / 1000.0;
+          const dt = Math.min(now - this._lastTime, 0.1); // cap at 100ms
+          this._lastTime = now;
+
+          // ---- Advection phase ----
+          if (this._useWebGPU && this._gpuReady) {
+            // WebGPU compute advection
+            this._dispatchGPUCompute(dt);
+
+            // Upload readback data to current WebGL buffer if available
+            if (this._gpuReadbackData) {
+              const targetBuf = this.particleBuffers[this.pingPong];
+              gl.bindBuffer(gl.ARRAY_BUFFER, targetBuf);
+              gl.bufferSubData(gl.ARRAY_BUFFER, 0, this._gpuReadbackData);
+              gl.bindBuffer(gl.ARRAY_BUFFER, null);
+            }
+          } else {
+            // WebGL2 Transform Feedback advection
+            gl.useProgram(this.advectProgram);
+
+            gl.activeTexture(gl.TEXTURE0);
+            gl.bindTexture(gl.TEXTURE_2D, this.roadIndexTex);
+            gl.uniform1i(this.advURoadIndex, 0);
+
+            gl.activeTexture(gl.TEXTURE1);
+            gl.bindTexture(gl.TEXTURE_2D, this.roadPointsTex);
+            gl.uniform1i(this.advURoadPoints, 1);
+
+            gl.uniform1i(this.advURoadCount, this.roadCount);
+            gl.uniform1i(this.advURoadPointsWidth, this.roadPointsWidth);
+            gl.uniform1i(this.advURoadIndexWidth, this.roadIndexWidth);
+            gl.uniform1f(this.advUDt, dt);
+            gl.uniform1f(this.advUSpeed, this.particleSpeed);
+            gl.uniform1f(this.advUSeed, now + Math.random());
+
+            gl.enable(gl.RASTERIZER_DISCARD);
+
+            gl.bindVertexArray(this.particleVAOs[this.pingPong]);
+            gl.bindTransformFeedback(gl.TRANSFORM_FEEDBACK, this.transformFeedbacks[this.pingPong]);
+            gl.beginTransformFeedback(gl.POINTS);
+            gl.drawArrays(gl.POINTS, 0, this.particleCount);
+            gl.endTransformFeedback();
+            gl.bindTransformFeedback(gl.TRANSFORM_FEEDBACK, null);
+            gl.bindVertexArray(null);
+
+            gl.disable(gl.RASTERIZER_DISCARD);
+
+            // Swap
+            this.pingPong = 1 - this.pingPong;
+
+            // Cleanup texture bindings
+            gl.activeTexture(gl.TEXTURE1);
+            gl.bindTexture(gl.TEXTURE_2D, null);
+            gl.activeTexture(gl.TEXTURE0);
+            gl.bindTexture(gl.TEXTURE_2D, null);
+          }
+
+          // ---- Draw phase ----
+          // Compute transform (same as trail layer)
+          mat3.identity(this.transform);
+          this.screenTranslation[0] = (state.pixelRatio * state.size[0]) / 2;
+          this.screenTranslation[1] = (state.pixelRatio * state.size[1]) / 2;
+          mat3.translate(this.transform, this.transform, this.screenTranslation);
+          mat3.rotate(this.transform, this.transform, (Math.PI * state.rotation) / 180);
+          this.screenScaling[0] = state.pixelRatio / state.resolution;
+          this.screenScaling[1] = -state.pixelRatio / state.resolution;
+          mat3.scale(this.transform, this.transform, this.screenScaling);
+
+          const tempTranslation = vec2.create();
+          vec2.copy(tempTranslation, this.translationToCenter);
+          mat3.translate(this.transform, this.transform, tempTranslation);
+
+          this.display[0] = 2 / (state.pixelRatio * state.size[0]);
+          this.display[4] = -2 / (state.pixelRatio * state.size[1]);
+
+          // Restore ArcGIS FBO
+          gl.bindFramebuffer(gl.FRAMEBUFFER, arcgisFBO);
+
+          gl.useProgram(this.drawProgram);
+          gl.uniformMatrix3fv(this.drawUTransform, false, this.transform);
+          gl.uniformMatrix3fv(this.drawUDisplay, false, this.display);
+          gl.uniform2f(this.drawUCenterOffset, this.centerAtLastUpdate[0], this.centerAtLastUpdate[1]);
+          gl.uniform1f(this.drawUPointSize, 3.0 * state.pixelRatio);
+
+          // Draw from current buffer
+          gl.bindVertexArray(this.particleVAOs[this.pingPong]);
+          gl.enable(gl.BLEND);
+          gl.blendFunc(gl.SRC_ALPHA, gl.ONE); // additive blending
+          gl.drawArrays(gl.POINTS, 0, this.particleCount);
+          gl.bindVertexArray(null);
+
+          // Reset blend mode
+          gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+
+          this.requestRender();
+        },
+      });
+
+      // ============================================================
+      //  ParticleLayer
+      // ============================================================
+      const ParticleLayer = GraphicsLayer.createSubclass({
+        properties: {
+          particleCount: 50000,
+          particleSpeed: 1.0,
+        },
+        createLayerView: function (view) {
+          if (view.type === "2d") {
+            return new ParticleLayerView2D({
+              view: view,
+              layer: this,
+            });
+          }
+        },
+      });
+
+      // ============================================================
+      //  App State
       // ============================================================
       let currentCity = "la";
       let flowLayer = null;
+      let particleLayer = null;
+      let particleLayerView = null;
+      let particlesEnabled = false;
+      let webGPUAvailable = false;
+      let useWebGPU = false;
+
+      // FPS tracking
+      let fpsFrames = 0;
+      let fpsLastTime = performance.now();
+
+      function updateFPS() {
+        fpsFrames++;
+        const now = performance.now();
+        if (now - fpsLastTime >= 1000) {
+          const fps = Math.round(fpsFrames * 1000 / (now - fpsLastTime));
+          document.getElementById("fpsValue").textContent = fps;
+          fpsFrames = 0;
+          fpsLastTime = now;
+        }
+        requestAnimationFrame(updateFPS);
+      }
 
       const map = new Map({
         basemap: "dark-gray-vector",
@@ -632,7 +1764,7 @@
       });
 
       // ============================================================
-      // Load City
+      //  Load City
       // ============================================================
       async function loadCity(cityKey) {
         currentCity = cityKey;
@@ -643,15 +1775,18 @@
         overlay.classList.remove("hidden");
         overlay.textContent = `Loading ${city.name} road network...`;
 
-        // Remove old layer
+        // Remove old layers
         if (flowLayer) {
           map.layers.remove(flowLayer);
         }
+        if (particleLayer) {
+          map.layers.remove(particleLayer);
+          particleLayer = null;
+          particleLayerView = null;
+        }
 
-        // Load real road data and clean it
+        // Load real road data
         const rawTrajectories = await loadCityData(cityKey);
-
-        // Data is pre-cleaned: no merging, deduped, Douglas-Peucker simplified
         const trajectories = rawTrajectories;
 
         // Diagnostics
@@ -673,7 +1808,7 @@
           }),
         }));
 
-        // Create layer with current UI settings
+        // Create trail layer with current UI settings
         flowLayer = new CustomLayer({
           graphics: graphics,
           trailSpeed: parseFloat(document.getElementById("trailSpeed").value),
@@ -683,6 +1818,14 @@
         });
 
         map.layers.add(flowLayer);
+
+        // Create particle layer if enabled
+        if (particlesEnabled) {
+          await createParticleLayer(trajectories);
+        }
+
+        // Store trajectories for later particle layer creation
+        window._currentTrajectories = trajectories;
 
         // Update view
         view.goTo({ center: city.center, zoom: city.zoom }, { duration: 1200 });
@@ -706,16 +1849,65 @@
         setTimeout(() => overlay.classList.add("hidden"), 500);
       }
 
-      // ============================================================
-      // UI Controls
-      // ============================================================
-      view.when(() => {
-        loadCity("la");
+      async function createParticleLayer(trajectories) {
+        if (particleLayer) {
+          map.layers.remove(particleLayer);
+        }
 
+        particleLayer = new ParticleLayer({
+          particleCount: parseInt(document.getElementById("particleCount").value),
+          particleSpeed: parseFloat(document.getElementById("particleSpeed").value),
+        });
+
+        map.layers.add(particleLayer);
+
+        // Wait for layer view to attach, then build road textures
+        particleLayerView = await view.whenLayerView(particleLayer);
+
+        // Small delay to ensure GL context is ready
+        await new Promise(r => setTimeout(r, 100));
+
+        particleLayerView.buildRoadTextures(trajectories);
+
+        // If WebGPU toggle is on, initialize it
+        if (useWebGPU && !particleLayerView._gpuDevice) {
+          const ok = await particleLayerView.initWebGPU();
+          if (ok) {
+            particleLayerView._useWebGPU = true;
+            document.getElementById("computeEngine").textContent = "WebGPU Compute";
+          }
+        } else if (useWebGPU && particleLayerView._gpuDevice) {
+          particleLayerView._useWebGPU = true;
+        }
+      }
+
+      // ============================================================
+      //  UI Controls
+      // ============================================================
+      view.when(async () => {
+        // Check WebGPU availability
+        if (navigator.gpu) {
+          try {
+            const adapter = await navigator.gpu.requestAdapter();
+            if (adapter) {
+              webGPUAvailable = true;
+              document.getElementById("gpuToggleContainer").style.display = "block";
+              console.log("[CityPulse] WebGPU is available");
+            }
+          } catch (e) {
+            console.log("[CityPulse] WebGPU not available:", e);
+          }
+        }
+
+        loadCity("la");
+        updateFPS();
+
+        // City buttons
         document.querySelectorAll(".city-btn").forEach((btn) => {
           btn.addEventListener("click", () => loadCity(btn.dataset.city));
         });
 
+        // Trail controls
         document.getElementById("trailSpeed").addEventListener("input", (e) => {
           const val = parseFloat(e.target.value);
           document.getElementById("speedVal").textContent = val;
@@ -732,6 +1924,82 @@
           const val = parseFloat(e.target.value);
           document.getElementById("widthVal").textContent = val;
           if (flowLayer) flowLayer.halfWidth = val;
+        });
+
+        // Bloom controls
+        document.getElementById("bloomToggle").addEventListener("change", (e) => {
+          const enabled = e.target.checked;
+          // Set bloom on the layer view
+          view.whenLayerView(flowLayer).then(lv => {
+            lv.bloomEnabled = enabled;
+          });
+        });
+
+        document.getElementById("bloomStrength").addEventListener("input", (e) => {
+          const val = parseFloat(e.target.value);
+          document.getElementById("bloomVal").textContent = val.toFixed(1);
+          view.whenLayerView(flowLayer).then(lv => {
+            lv.bloomStrength = val;
+          });
+        });
+
+        // Particle controls
+        document.getElementById("particleToggle").addEventListener("change", async (e) => {
+          particlesEnabled = e.target.checked;
+          if (particlesEnabled && window._currentTrajectories) {
+            await createParticleLayer(window._currentTrajectories);
+          } else if (!particlesEnabled && particleLayer) {
+            map.layers.remove(particleLayer);
+            particleLayer = null;
+            particleLayerView = null;
+          }
+        });
+
+        document.getElementById("particleCount").addEventListener("input", (e) => {
+          const val = parseInt(e.target.value);
+          const label = val >= 1000 ? (val / 1000) + "K" : val;
+          document.getElementById("particleCountVal").textContent = label;
+          if (particleLayerView) {
+            particleLayerView.reinitParticles(val);
+          }
+        });
+
+        document.getElementById("particleSpeed").addEventListener("input", (e) => {
+          const val = parseFloat(e.target.value);
+          document.getElementById("particleSpeedVal").textContent = val.toFixed(1);
+          if (particleLayerView) {
+            particleLayerView.particleSpeed = val;
+          }
+        });
+
+        // WebGPU toggle
+        document.getElementById("gpuToggleBtn").addEventListener("click", async () => {
+          if (!webGPUAvailable) return;
+          useWebGPU = !useWebGPU;
+
+          if (useWebGPU) {
+            if (particleLayerView) {
+              if (!particleLayerView._gpuDevice) {
+                const ok = await particleLayerView.initWebGPU();
+                if (ok) {
+                  particleLayerView._useWebGPU = true;
+                  document.getElementById("computeEngine").textContent = "WebGPU Compute";
+                } else {
+                  useWebGPU = false;
+                }
+              } else {
+                particleLayerView._useWebGPU = true;
+                document.getElementById("computeEngine").textContent = "WebGPU Compute";
+              }
+            } else {
+              document.getElementById("computeEngine").textContent = "WebGPU Compute";
+            }
+          } else {
+            if (particleLayerView) {
+              particleLayerView._useWebGPU = false;
+            }
+            document.getElementById("computeEngine").textContent = "WebGL2 TF";
+          }
         });
       });
     </script>
@@ -785,6 +2053,39 @@
       <div class="control-group">
         <label>Line Width <span class="control-value" id="widthVal">6</span></label>
         <input type="range" id="lineWidth" min="1" max="20" value="6" />
+      </div>
+
+      <div class="divider"></div>
+
+      <div class="control-group">
+        <label><input type="checkbox" id="bloomToggle" checked /> Enable Bloom
+          <span class="control-value" id="bloomVal">0.6</span></label>
+        <input type="range" id="bloomStrength" min="0" max="2" step="0.1" value="0.6" />
+      </div>
+
+      <div class="divider"></div>
+
+      <div class="control-group">
+        <label><input type="checkbox" id="particleToggle" /> Enable Particles
+          <span class="control-value" id="particleCountVal">50K</span></label>
+        <input type="range" id="particleCount" min="10000" max="200000" step="10000" value="50000" />
+      </div>
+
+      <div class="control-group">
+        <label>Particle Speed <span class="control-value" id="particleSpeedVal">1.0</span></label>
+        <input type="range" id="particleSpeed" min="0.1" max="5" step="0.1" value="1.0" />
+      </div>
+
+      <div class="stat">
+        <span class="stat-label">Compute</span>
+        <span class="stat-value" id="computeEngine">WebGL2 TF</span>
+      </div>
+      <div class="stat">
+        <span class="stat-label">FPS</span>
+        <span class="stat-value" id="fpsValue">--</span>
+      </div>
+      <div id="gpuToggleContainer" style="display:none; margin-top: 6px;">
+        <button class="compute-toggle-btn" id="gpuToggleBtn">Toggle WebGPU / WebGL2</button>
       </div>
 
       <div class="divider"></div>
